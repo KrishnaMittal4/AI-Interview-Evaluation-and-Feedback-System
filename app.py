@@ -14,8 +14,8 @@ Design: Matrix-green / neon-cyan / electric-violet on deep black
 from __future__ import annotations
 
 import os
-from secrets_loader import load_secrets
-load_secrets()
+from dotenv import load_dotenv
+load_dotenv()
 
 import json
 import re
@@ -4421,14 +4421,21 @@ body{{background:transparent;font-family:Inter,sans-serif;}}
                 if not _ans.strip():
                     _ans = st.session_state.get("transcribed_text", "")
                 # Recover audio bytes if submit rerun cleared last_audio_bytes.
-                # Try both the stable backup key AND the typed/whisper path.
+                # Check Whisper-specific backup first, then Browser STT backup.
                 if not st.session_state.get("last_audio_bytes"):
-                    for _backup_key in ("_bstt_last_audio_bytes",):
-                        _saved = st.session_state.get(_backup_key)
-                        if _saved:
-                            st.session_state["last_audio_bytes"]  = _saved
-                            st.session_state["last_audio_source"] = "browser_stt"
-                            break
+                    _whisper_backup = st.session_state.get(
+                        f"_whisper_last_audio_bytes_{qn}"
+                    )
+                    if _whisper_backup:
+                        st.session_state["last_audio_bytes"]  = _whisper_backup
+                        st.session_state["last_audio_source"] = "whisper_mic"
+                    else:
+                        for _backup_key in ("_bstt_last_audio_bytes",):
+                            _saved = st.session_state.get(_backup_key)
+                            if _saved:
+                                st.session_state["last_audio_bytes"]  = _saved
+                                st.session_state["last_audio_source"] = "browser_stt"
+                                break
                 # Guard: nothing to submit — set a flag so UI can warn user
                 if not _ans.strip():
                     st.session_state["_submit_empty_warning"] = True
@@ -4467,12 +4474,16 @@ body{{background:transparent;font-family:Inter,sans-serif;}}
                         "last_answer_text": _ans,   # v12.2: used by scan beam
                     })
                     em_summary = engine.get_emotion_summary()
-                    _audio_raw = st.session_state.get("last_audio_bytes")
+                    # ── Bug 4 fix: exhaustive audio-bytes recovery chain ──────
+                    # Three backup keys exist because Streamlit reruns can clear
+                    # last_audio_bytes before submit_answer() reads it.
+                    # Priority: live key → Whisper backup → Browser STT backup
+                    _audio_raw = (
+                        st.session_state.get("last_audio_bytes")
+                        or st.session_state.get(f"_whisper_last_audio_bytes_{qn}")
+                        or st.session_state.get("_bstt_last_audio_bytes")
+                    )
                     _audio_src = st.session_state.get("last_audio_source", "")
-                    # v9.0: recover stable audio backup (Browser STT sets this
-                    # before the rerun clears last_audio_bytes)
-                    if not _audio_raw:
-                        _audio_raw = st.session_state.get("_bstt_last_audio_bytes")
 
                     if st.session_state.get("nervousness_ready"):
                         try:
@@ -4497,11 +4508,24 @@ body{{background:transparent;font-family:Inter,sans-serif;}}
                             _v_conf = _voice_result.get("confidence", 50.0) / 100 * 5
                             engine._live_voice_scores.append(_v_conf)
                             engine.voice_quality.record(_voice_result)
+
+                            # Bug 5 fix: push result into live session_state keys
+                            # immediately so the sidebar shows the updated value
+                            # on the very next rerun — not just after the next
+                            # get_live_voice_result() poll cycle.
+                            _vn = _voice_result.get(
+                                "smoothed_nervousness",
+                                _voice_result.get("nervousness", 0.2)
+                            )
+                            _ve = _voice_result.get("dominant", "Neutral")
+                            st.session_state["live_voice_nerv"]    = _vn
+                            st.session_state["live_voice_emotion"] = _ve
                         except Exception:
                             pass
                     st.session_state["last_audio_bytes"]  = None
                     st.session_state["last_audio_source"] = None
-                    st.session_state.pop("_bstt_last_audio_bytes", None)  # v9.0 clear backup
+                    st.session_state.pop("_bstt_last_audio_bytes", None)      # Browser STT backup
+                    st.session_state.pop(f"_whisper_last_audio_bytes_{qn}", None)  # Whisper backup
                     vs_summary = engine.get_voice_session_summary()
                     mm_conf    = engine.get_multimodal_confidence()
                     st.session_state.session_answers.append({
@@ -5073,7 +5097,9 @@ body{{background:transparent;font-family:Inter,sans-serif;overflow:hidden;}}
                             "last_audio_bytes": None, "last_audio_source": None,
                         })
                         for _k in [f"_bstt_last_tx_{qn}", f"transcribed_text_browser_{qn}",
-                                   "_bstt_last_audio_bytes"]:
+                                   "_bstt_last_audio_bytes",
+                                   f"_whisper_last_audio_bytes_{qn}",
+                                   f"_whisper_audio_id_{qn}"]:
                             st.session_state.pop(_k, None)
                     else:
                         st.session_state.update({
@@ -5088,7 +5114,9 @@ body{{background:transparent;font-family:Inter,sans-serif;overflow:hidden;}}
                             "last_audio_bytes": None, "last_audio_source": None,
                         })
                         for _k in [f"_bstt_last_tx_{qn}", f"transcribed_text_browser_{qn}",
-                                   "_bstt_last_audio_bytes"]:
+                                   "_bstt_last_audio_bytes",
+                                   f"_whisper_last_audio_bytes_{qn}",
+                                   f"_whisper_audio_id_{qn}"]:
                             st.session_state.pop(_k, None)
 
                 _fu_lbl = (
