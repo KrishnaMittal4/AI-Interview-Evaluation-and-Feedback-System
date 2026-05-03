@@ -663,6 +663,12 @@ def _collect_session_data(ss: Any) -> Dict:
         nerv_vals = [e.get("nervousness") for e in emotions if e.get("nervousness") is not None]
         avg_nerv  = round(sum(nerv_vals) / len(nerv_vals), 3) if nerv_vals else None
 
+    # --- Gaze zone / eye contact (Idea 1) ---
+    _gz_stats           = ss.get("_live_gaze_zone_stats", {})
+    gaze_contact_pct    = _gz_stats.get("gaze_contact_pct")
+    gaze_contact_grade  = _gz_stats.get("gaze_contact_grade")
+    gaze_zone_dist      = _gz_stats.get("gaze_zone_dist", {})
+
     # --- Dominant emotion ---
     dominant_emotion = nerv_summary.get("dominant", "")
     if not dominant_emotion and emotions:
@@ -705,6 +711,10 @@ def _collect_session_data(ss: Any) -> Dict:
         # v2.0: improved answers generated via the insight panel ─────────────
         # keyed as "insight_q1", "insight_q2", … matching panel_key in the UI
         "improved_answers": ss.get("_improved_answers", {}),
+        # Idea 1: gaze zone / eye contact session stats ───────────────────────
+        "gaze_contact_pct":   gaze_contact_pct,
+        "gaze_contact_grade": gaze_contact_grade,
+        "gaze_zone_dist":     gaze_zone_dist,
     }
 
 
@@ -962,7 +972,7 @@ def _render_streamlit_report(data: Dict) -> None:
     )
 
     # ── Summary metric cards ──────────────────────────────────────────────────
-    col_a, col_b, col_c, col_d = st.columns(4)
+    col_a, col_b, col_c, col_d, col_e = st.columns(5)
 
     def _metric_card(col, label: str, value: str, colour: str, sub: str = "") -> None:
         col.markdown(
@@ -1011,8 +1021,63 @@ def _render_streamlit_report(data: Dict) -> None:
             _C['teal'],
             "across session",
         )
+    with col_e:
+        # ── Idea 1: Eye Contact % metric card ─────────────────────────────
+        _eye_pct   = data.get("gaze_contact_pct")
+        _eye_grade = data.get("gaze_contact_grade") or "—"
+        _eye_col   = (
+            "#00ff88" if _eye_grade == "Excellent" else
+            "#00d4ff" if _eye_grade == "Good"      else
+            "#f59e0b" if _eye_grade == "Fair"      else
+            "#ff3366" if _eye_grade == "Poor"      else
+            _C['muted']
+        )
+        _metric_card(
+            col_e,
+            "Eye Contact",
+            f"{_eye_pct:.0f}%" if _eye_pct is not None else "—",
+            _eye_col,
+            _eye_grade,
+        )
 
     st.markdown("<br>", unsafe_allow_html=True)
+
+    # ── Idea 1: Gaze zone distribution bar (only if data available) ───────────
+    _gz_dist = data.get("gaze_zone_dist", {})
+    if _gz_dist:
+        _zone_label_map = {
+            "CAMERA":        "🎯 Direct Eye Contact",
+            "SCREEN_CENTRE": "🖥️ Screen Centre",
+            "OFF_LEFT":      "← Off Left",
+            "OFF_RIGHT":     "→ Off Right",
+            "DOWN":          "↓ Looking Down",
+            "UP":            "↑ Looking Up",
+            "UNKNOWN":       "? Unknown",
+        }
+        st.markdown(
+            f'<h4 style="color:{_C["text"]};font-size:.88rem;font-weight:700;'
+            f'margin-bottom:.4rem;">👁️ Gaze Zone Distribution</h4>',
+            unsafe_allow_html=True,
+        )
+        _gz_html = ""
+        for _z, _p in sorted(_gz_dist.items(), key=lambda x: -x[1]):
+            _zc = "#00ff88" if _z == "CAMERA" else "rgba(200,220,240,.3)"
+            _lbl = _zone_label_map.get(_z, _z)
+            _gz_html += f"""
+<div style="display:flex;align-items:center;gap:10px;margin-bottom:5px;">
+  <span style="font-size:.7rem;color:rgba(200,220,240,.6);
+               font-family:'Share Tech Mono',monospace;width:160px;flex-shrink:0;">{_lbl}</span>
+  <div style="flex:1;background:rgba(255,255,255,.05);border-radius:4px;height:8px;overflow:hidden;">
+    <div style="width:{_p}%;height:100%;background:{_zc};border-radius:4px;"></div>
+  </div>
+  <span style="font-size:.7rem;color:rgba(200,220,240,.5);
+               font-family:'Share Tech Mono',monospace;width:38px;text-align:right;">{_p:.0f}%</span>
+</div>"""
+        st.markdown(
+            f'<div style="background:{_C["bg_card"]};border-radius:12px;padding:14px 18px;'
+            f'margin-bottom:12px;">{_gz_html}</div>',
+            unsafe_allow_html=True,
+        )
 
     # ── Performance timeline chart (Feature 9) ───────────────────────────────
     _render_timeline_streamlit(data)
@@ -1263,11 +1328,53 @@ def _build_pdf(data: Dict) -> bytes:
     story.append(HRFlowable(width="100%", thickness=0.5,
                             color=RL_ACCENT, spaceAfter=14))
 
+    # ── Cover page session summary stat row ───────────────────────────────────
+    _cov_score_str = f"{data['avg_score']}/10  ({data['verdict']})" if data['avg_score'] else "—"
+    _cov_nerv_str  = (f"{int((data['avg_nerv'] or 0)*100)}%  "
+                      f"({_nerv_label(data['avg_nerv'] or 0)})") if data['avg_nerv'] else "—"
+    _cov_eye_pct   = data.get("gaze_contact_pct")
+    _cov_eye_grade = data.get("gaze_contact_grade") or "—"
+    _cov_eye_str   = (f"{_cov_eye_pct:.0f}%  ({_cov_eye_grade})"
+                      if _cov_eye_pct is not None else "Not recorded")
+    _cov_eye_hex   = (
+        "#22d87a" if _cov_eye_grade == "Excellent" else
+        "#00d4ff" if _cov_eye_grade == "Good"      else
+        "#ffb840" if _cov_eye_grade == "Fair"      else
+        "#ff5c5c" if _cov_eye_grade == "Poor"      else "#5a7098"
+    )
 
-    # ══════════════════════════════════════════════════════════════════════════
-    # INTERVIEW PREPARATION GUIDE  (inserted between cover and Q&A breakdown)
-    # ══════════════════════════════════════════════════════════════════════════
-    story.append(PageBreak())
+    _stat_style = _style("cov_stat_v", fontSize=11, textColor=RL_WHITE,
+                         fontName="Helvetica-Bold", alignment=TA_CENTER)
+    _stat_lbl   = _style("cov_stat_l", fontSize=7,  textColor=RL_MUTED,
+                         alignment=TA_CENTER, spaceBefore=0, spaceAfter=0)
+
+    cov_stats_tbl = Table(
+        [[
+            Paragraph(f'<font color="{_score_colour(data["avg_score"] or 0)}">'
+                      f'{_cov_score_str}</font>', _stat_style),
+            Paragraph(f'<font color="{_nerv_colour(data["avg_nerv"] or 0)}">'
+                      f'{_cov_nerv_str}</font>', _stat_style),
+            Paragraph(f'<font color="{_cov_eye_hex}">'
+                      f'{_cov_eye_str}</font>', _stat_style),
+        ], [
+            Paragraph("Overall Score", _stat_lbl),
+            Paragraph("Avg Nervousness", _stat_lbl),
+            Paragraph("Eye Contact", _stat_lbl),
+        ]],
+        colWidths=[(W - 4*cm) / 3] * 3,
+    )
+    cov_stats_tbl.setStyle(TableStyle([
+        ("BACKGROUND",    (0, 0), (-1, -1), colors.HexColor("#0a1030")),
+        ("TOPPADDING",    (0, 0), (-1, 0),  12),
+        ("BOTTOMPADDING", (0, 1), (-1, 1),  12),
+        ("TOPPADDING",    (0, 1), (-1, 1),  2),
+        ("LEFTPADDING",   (0, 0), (-1, -1), 8),
+        ("RIGHTPADDING",  (0, 0), (-1, -1), 8),
+        ("LINEAFTER",     (0, 0), (1, -1),  0.5, colors.HexColor("#1c2a50")),
+        ("ROUNDEDCORNERS", [6]),
+    ]))
+    story.append(cov_stats_tbl)
+    story.append(Spacer(1, 10))
 
     # ── Page title band ───────────────────────────────────────────────────────
     prep_title_tbl = Table(
@@ -1289,7 +1396,10 @@ def _build_pdf(data: Dict) -> bytes:
     story.append(prep_title_tbl)
     story.append(Spacer(1, 10))
 
-    # ── Helper: build a single guide section block ────────────────────────────
+    # ══════════════════════════════════════════════════════════════════════════
+    # INTERVIEW PREPARATION GUIDE  (inserted between cover and Q&A breakdown)
+    # ══════════════════════════════════════════════════════════════════════════
+    story.append(PageBreak())
     _GUIDE_CW = W - 4*cm  # full content width
 
     def _guide_section(accent_colour, heading: str, items: list[str]) -> Table:
@@ -3901,6 +4011,7 @@ def _build_plain_text_fallback(data: Dict) -> str:
         f"Overall Score  : {data['avg_score']}/10  ({data['verdict']})" if data['avg_score'] else "Overall Score  : —",
         f"Avg Nervousness: {int((data['avg_nerv'] or 0)*100)}%  ({_nerv_label(data['avg_nerv'] or 0)})" if data['avg_nerv'] else "Avg Nervousness: —",
         f"Dominant Emotion: {data['dominant_emotion'] or '—'}",
+        f"Eye Contact    : {data['gaze_contact_pct']:.0f}%  ({data['gaze_contact_grade']})" if data.get('gaze_contact_pct') is not None else "Eye Contact    : Not recorded",
         "",
         "-" * 70,
         "QUESTION-BY-QUESTION BREAKDOWN",
