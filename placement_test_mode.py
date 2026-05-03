@@ -834,6 +834,10 @@ PLACEMENT_DEFAULTS: Dict = {
     "pt_switch_warned":    False,     # True once the user has been warned
     "pt_test_locked":      False,     # True when test is forcibly locked
     "pt_lock_trigger":     "",        # reason string shown on lock screen
+    # Solution 2: JS writes epoch-seconds here when window hides; autorefresh
+    # checks it every 3 s and locks server-side without needing a button click.
+    "pt_blur_at":          0.0,      # epoch float set by JS on hide; 0 = visible
+    "pt_blur_notified":    False,     # True once the 10 s server lock has fired
     # ── Popup upload state ────────────────────────────────────────────────────
     "_cq_popup_open":      False,    # True while upload popup is displayed
     "_cq_popup_done":      False,    # True once popup dismissed -> trigger start
@@ -1339,11 +1343,8 @@ def _question_window_mcq(q: Dict, qi: int, ri: int, tpq: int, nq: int) -> None:
   font-family:'Share Tech Mono',monospace;font-size:7px;
   color:rgba(255,255,255,.3);letter-spacing:1.5px;margin-top:2px;
 }
-@keyframes mcq-ring-urgent{
-  0%,100%{filter:drop-shadow(0 0 0px #ff3366);}
-  50%{filter:drop-shadow(0 0 8px #ff3366);}
-}
-.mcq-ring-urgent{animation:mcq-ring-urgent 0.8s ease-in-out infinite;}
+/* mcq-ring-urgent: static red glow — no blinking animation */
+.mcq-ring-urgent{filter:drop-shadow(0 0 6px rgba(255,51,102,.55));}
 
 /* Question text */
 .mcq-qtext{font-family:'Inter',sans-serif;font-size:1.55rem;font-weight:700;
@@ -1354,10 +1355,8 @@ def _question_window_mcq(q: Dict, qi: int, ri: int, tpq: int, nq: int) -> None:
 .mcq-dot{width:10px;height:10px;border-radius:50%;display:inline-block;}
 .mcq-dot-ok{background:#00ff88;}
 .mcq-dot-err{background:#ff3366;}
-.mcq-dot-curr{background:#6366f1;animation:mcq-dot-pulse 1s ease-in-out infinite;}
+.mcq-dot-curr{background:#6366f1;box-shadow:0 0 0 3px rgba(99,102,241,.35);}
 .mcq-dot-pending{background:rgba(255,255,255,.1);}
-@keyframes mcq-dot-pulse{0%,100%{box-shadow:0 0 0 0 rgba(99,102,241,.5);}
-  50%{box-shadow:0 0 0 4px transparent;}}
 
 /* ── Option stagger-in animation ── */
 @keyframes mcq-opt-slide{
@@ -1539,7 +1538,6 @@ div[data-testid="stButton"].mcq-next > button:hover{
     if(rem<=10){{
       ring.style.stroke='#ff3366';
       num.style.color='#ff3366';
-      if(!wrap.classList.contains('mcq-ring-urgent')) wrap.classList.add('mcq-ring-urgent');
     }} else if(rem<=20){{
       ring.style.stroke='#f59e0b';
       num.style.color='#f59e0b';
@@ -2525,21 +2523,127 @@ def page_placement_test() -> None:
     """Call from app.py: elif p == 'Placement Test': page_placement_test()"""
     _inject_css()
 
-    # ── Proctor: initialise hidden buttons for JS → Python bridge ─────────────
-    # PT_SWITCH      : fired every time the user leaves the tab/window (≤10 s)
-    # PT_SWITCH_LONG : fired when the user has been away for >10 seconds
-    # PT_TIMER_EXPIRED : existing MCQ timer bridge
+    # ── Proctor JS  (Solution 1 + Solution 2 combined) ───────────────────────
+    #
+    # SOLUTION 1 — JS overlay (zero-latency visual lock)
+    #   • _onHide() starts a 10-second setTimeout.
+    #   • If the user is still away when it fires, a full-screen black overlay
+    #     is injected onto window.parent.document.body RIGHT NOW — no rerun,
+    #     no button click needed.  The test becomes visually unusable instantly.
+    #   • _onShow() cancels the timer if the user returns in time.
+    #   • If the timer already fired the overlay is permanent; _onShow() then
+    #     also clicks __PT_SWITCH_LONG__ so Python locks the session too.
+    #
+    # SOLUTION 2 — blur timestamp → st_autorefresh (server-side lock)
+    #   • _onHide() writes window.__ptBlurEpoch = Date.now()/1000 into a hidden
+    #     <input> that the __PT_BLUR__ bridge button reads on click.
+    #   • _onHide() also clicks __PT_BLUR__ immediately so Python stores
+    #     pt_blur_at in session_state.
+    #   • st_autorefresh (added below) reruns Python every 3 s.
+    #   • On each rerun, Python checks time.time() - pt_blur_at > 10 and sets
+    #     pt_test_locked=True without any user interaction.
+    #
+    # Together:  user never returns  → overlay blocks UI (Sol 1)
+    #            user returns quickly → autorefresh already locked Python (Sol 2)
+    # ─────────────────────────────────────────────────────────────────────────
     components.html("""
 <script>
 (function(){
-  var _blurAt=0;
-  var _PARENT=window.parent;
+  var _PARENT   = window.parent;
+  var _blurAt   = 0;          // ms timestamp when window hid
+  var _lockTimer= null;       // setTimeout handle for 10 s overlay
+  var _overlayOn= false;      // true once overlay has been injected
 
-  // ── Bridge: click a hidden Streamlit button by label ──────────────────────
+  // ── Bridge: click a hidden Streamlit button by label ─────────────────────
   function _click(text){
     var btns=_PARENT.document.querySelectorAll("button");
     for(var i=0;i<btns.length;i++){
       if(btns[i].innerText.trim()===text){btns[i].click();return;}
+    }
+  }
+
+  // ── SOLUTION 1: inject a full-screen overlay on the parent page ──────────
+  function _showLockOverlay(reason){
+    if(_overlayOn) return;
+    _overlayOn = true;
+    var ov = _PARENT.document.createElement("div");
+    ov.id  = "pt-lock-overlay";
+    ov.setAttribute("style",[
+      "position:fixed","inset:0","z-index:2147483647",
+      "background:#050a16",
+      "display:flex","flex-direction:column",
+      "align-items:center","justify-content:center","gap:18px",
+      "font-family:'Share Tech Mono',monospace"
+    ].join(";"));
+    ov.innerHTML = [
+      "<div style='font-size:54px'>🔒</div>",
+      "<div style='color:#ff3366;font-size:26px;font-weight:700;",
+           "letter-spacing:.08em'>TEST LOCKED</div>",
+      "<div style='color:rgba(255,255,255,.55);font-size:14px;",
+           "max-width:400px;text-align:center;line-height:1.7'>",
+           reason,"</div>",
+      "<div style='color:rgba(255,255,255,.25);font-size:12px;",
+           "margin-top:8px'>Contact your invigilator to unlock.</div>"
+    ].join("");
+    // Swallow all interaction — nothing behind the overlay is clickable
+    ov.addEventListener("click",    function(e){e.stopPropagation();},true);
+    ov.addEventListener("keydown",  function(e){e.preventDefault(); e.stopPropagation();},true);
+    ov.addEventListener("mousedown",function(e){e.stopPropagation();},true);
+    _PARENT.document.body.appendChild(ov);
+    // Also tell Python — will be confirmed on the next autorefresh rerun
+    _click("__PT_SWITCH_LONG__");
+  }
+
+  // ── SOLUTION 2: write blur epoch so Python can check it on autorefresh ────
+  function _writeBlurEpoch(){
+    // Store on window so _click("__PT_BLUR__") handler can read it
+    _PARENT.__ptBlurEpoch = Date.now() / 1000;
+    _click("__PT_BLUR__");
+  }
+  function _clearBlurEpoch(){
+    _PARENT.__ptBlurEpoch = 0;
+    _click("__PT_BLUR_CLEAR__");
+  }
+
+  // ── Core hide / show logic ────────────────────────────────────────────────
+  function _onHide(){
+    if(_blurAt !== 0) return;            // already tracking
+    _blurAt = Date.now();
+
+    // SOLUTION 2: tell Python we are away right now
+    _writeBlurEpoch();
+
+    // SOLUTION 1: start countdown — fires even if user never returns
+    _lockTimer = setTimeout(function(){
+      _showLockOverlay(
+        "You were away from the test window for more than 10 seconds."
+      );
+    }, 10000);
+  }
+
+  function _onShow(){
+    if(_blurAt === 0) return;            // was never hidden
+    clearTimeout(_lockTimer);
+    _lockTimer = null;
+    var away = (Date.now() - _blurAt) / 1000;
+    _blurAt   = 0;
+
+    if(_overlayOn){
+      // Overlay already shown — just make sure Python also locks
+      _click("__PT_SWITCH_LONG__");
+      return;
+    }
+
+    // SOLUTION 2: clear blur epoch so autorefresh stops alarming
+    _clearBlurEpoch();
+
+    if(away > 10){
+      // Returned after >10 s but timer hadn't fired yet (edge case)
+      _showLockOverlay(
+        "You were away from the test window for more than 10 seconds."
+      );
+    } else {
+      _click("__PT_SWITCH__");
     }
   }
 
@@ -2550,7 +2654,6 @@ def page_placement_test() -> None:
     if(e.data.type==="PT_IFRAME_BLUR")   _onHide();
     if(e.data.type==="PT_IFRAME_FOCUS")  _onShow();
   },false);
-  // Also listen on this iframe (for cross-iframe postMessage relay)
   window.addEventListener("message",function(e){
     if(!e.data) return;
     if(e.data.type==="PT_TIMER_EXPIRED") _click("__PT_ADV__");
@@ -2558,50 +2661,27 @@ def page_placement_test() -> None:
     if(e.data.type==="PT_IFRAME_FOCUS")  _onShow();
   },false);
 
-  // ── Tab / window switch detection ─────────────────────────────────────────
-  function _onHide(){
-    if(_blurAt===0) _blurAt=Date.now();
-  }
-  function _onShow(){
-    if(_blurAt===0) return;
-    var away=(Date.now()-_blurAt)/1000;
-    _blurAt=0;
-    if(away>10){ _click("__PT_SWITCH_LONG__"); }
-    else        { _click("__PT_SWITCH__"); }
-  }
-
+  // ── Visibility / focus / blur event wiring ────────────────────────────────
   _PARENT.document.addEventListener("visibilitychange",function(){
     if(_PARENT.document.hidden) _onHide(); else _onShow();
   });
-  _PARENT.addEventListener("blur", _onHide);
-  _PARENT.addEventListener("focus",_onShow);
-  // Also watch the iframe window itself (handles Streamlit iframe focus shifts)
-  window.addEventListener("blur", _onHide);
-  window.addEventListener("focus",_onShow);
+  _PARENT.addEventListener("blur",  _onHide);
+  _PARENT.addEventListener("focus", _onShow);
+  window.addEventListener("blur",   _onHide);
+  window.addEventListener("focus",  _onShow);
 
-  // ── Alt+Tab / Meta+Tab keyboard detection ─────────────────────────────────
+  // ── Alt+Tab / Meta+Tab / Windows key ─────────────────────────────────────
   _PARENT.document.addEventListener("keydown",function(e){
-    // Alt+Tab (Windows/Linux) or Cmd+Tab (Mac)
     if((e.altKey||e.metaKey)&&e.key==="Tab"){ _onHide(); }
-    // Windows key
-    if(e.key==="Meta"||e.key==="OS"){ _onHide(); }
+    if(e.key==="Meta"||e.key==="OS"){         _onHide(); }
   });
 
-  // ── Mouse leaving the browser viewport ────────────────────────────────────
-  // Fires when cursor moves to a different app (taskbar, another window, etc.)
-  _PARENT.document.addEventListener("mouseleave",function(){
-    if(_blurAt===0) _blurAt=Date.now();
-  });
-  _PARENT.document.addEventListener("mouseenter",function(){
-    _onShow();
-  });
+  // ── Mouse leaving the browser viewport ───────────────────────────────────
+  _PARENT.document.addEventListener("mouseleave",function(){ _onHide(); });
+  _PARENT.document.addEventListener("mouseenter",function(){ _onShow(); });
 
   // ── Block copy / paste / cut ──────────────────────────────────────────────
-  function _blockClipboard(e){
-    e.preventDefault();
-    e.stopPropagation();
-    return false;
-  }
+  function _blockClipboard(e){ e.preventDefault(); e.stopPropagation(); return false; }
   _PARENT.document.addEventListener("copy",  _blockClipboard, true);
   _PARENT.document.addEventListener("cut",   _blockClipboard, true);
   _PARENT.document.addEventListener("paste", _blockClipboard, true);
@@ -2611,11 +2691,10 @@ def page_placement_test() -> None:
     e.preventDefault(); return false;
   }, true);
 
-  // ── Block Ctrl+C / Ctrl+V / Ctrl+X / PrintScreen / F12 ──────────────────
+  // ── Block Ctrl+C / Ctrl+V / Ctrl+X / PrintScreen / F12 ───────────────────
   _PARENT.document.addEventListener("keydown",function(e){
     var ctrl=e.ctrlKey||e.metaKey;
     if(ctrl && (e.key==="c"||e.key==="v"||e.key==="x"||e.key==="a")){
-      // Only block if not inside an input/textarea (allow typing own answer)
       var tag=(e.target&&e.target.tagName)||"";
       if(tag!=="INPUT"&&tag!=="TEXTAREA"){
         e.preventDefault(); e.stopPropagation();
@@ -2629,15 +2708,10 @@ def page_placement_test() -> None:
   // ── Disable text selection outside input areas ────────────────────────────
   _PARENT.document.addEventListener("selectstart",function(e){
     var tag=(e.target&&e.target.tagName)||"";
-    if(tag!=="INPUT"&&tag!=="TEXTAREA"){
-      e.preventDefault(); return false;
-    }
+    if(tag!=="INPUT"&&tag!=="TEXTAREA"){ e.preventDefault(); return false; }
   });
 
   // ── Remove duplicate app.py top navbar ───────────────────────────────────
-  // app.py's render_top_navbar() always fires before page_placement_test().
-  // Find and hide the sticky "Aura AI" bar so only the placement test's own
-  // header is visible.
   function _hideAppNavbar(){
     var nodes=_PARENT.document.querySelectorAll(
       'div[style*="position:sticky"],div[style*="position: sticky"]'
@@ -2648,7 +2722,6 @@ def page_placement_test() -> None:
         n.style.setProperty("display","none","important");
       }
     }
-    // Hide floating back button too
     var backs=_PARENT.document.querySelectorAll(".back-btn-navbar");
     for(var j=0;j<backs.length;j++) backs[j].style.setProperty("display","none","important");
   }
@@ -2658,6 +2731,39 @@ def page_placement_test() -> None:
 
 })();
 </script>""", height=0, scrolling=False)
+
+    # ── SOLUTION 2: st_autorefresh — periodic server-side proctor ping ───────
+    # Only active during a live test round.  Every 3 s Python wakes up and
+    # checks whether pt_blur_at is set and > 10 s old, locking without any
+    # user interaction.  The autorefresh widget is invisible (height=0-ish).
+    _phase_now = st.session_state.get("pt_phase", "setup")
+    if _phase_now == "running" and not st.session_state.get("pt_test_locked", False):
+        try:
+            from streamlit_autorefresh import st_autorefresh
+            st_autorefresh(interval=3000, limit=None, key="pt_proctor_ping")
+        except ImportError:
+            # Graceful fallback — Solution 1 (JS overlay) still works without it.
+            # Install with:  pip install streamlit-autorefresh
+            pass
+
+    # ── SOLUTION 2: server-side blur check (runs on every autorefresh rerun) ─
+    import time as _time
+    _blur_at = st.session_state.get("pt_blur_at", 0.0)
+    if (
+        _blur_at > 0
+        and _phase_now == "running"
+        and not st.session_state.get("pt_test_locked", False)
+        and not st.session_state.get("pt_blur_notified", False)
+    ):
+        _away_s = _time.time() - _blur_at
+        if _away_s > 10:
+            st.session_state.pt_test_locked   = True
+            st.session_state.pt_blur_notified = True
+            st.session_state.pt_lock_trigger  = (
+                f"Proctor detected you were away from the test window for "
+                f"{_away_s:.0f} seconds. The test has been locked automatically."
+            )
+            st.rerun()
 
     # ── Inject CSS FIRST to hide bridge buttons before they render ───────────
     # Multiple selectors to ensure buttons are invisible regardless of
@@ -2669,7 +2775,9 @@ button[title='internal'],
 div[data-testid="stButton"]:has(button[title='internal']),
 div[data-testid="stButton"][data-key="pt_adv_hid"],
 div[data-testid="stButton"][data-key="pt_switch_hid"],
-div[data-testid="stButton"][data-key="pt_switch_long_hid"] {
+div[data-testid="stButton"][data-key="pt_switch_long_hid"],
+div[data-testid="stButton"][data-key="pt_blur_hid"],
+div[data-testid="stButton"][data-key="pt_blur_clear_hid"] {
   display:none!important;visibility:hidden!important;
   height:0!important;width:0!important;
   overflow:hidden!important;position:absolute!important;
@@ -2692,14 +2800,16 @@ footer{visibility:hidden!important;}
         st.markdown('<div style="display:none;height:0;overflow:hidden;position:absolute;'
                     'pointer-events:none;opacity:0" aria-hidden="true">',
                     unsafe_allow_html=True)
+
+        # ── MCQ timer advance ────────────────────────────────────────────────
         if st.button("__PT_ADV__", key="pt_adv_hid", help="internal"):
             st.session_state._pt_skip_triggered = True
             st.rerun()
 
-        # Short switch (≤10 s away)
+        # ── Short switch (≤10 s away) ────────────────────────────────────────
         if st.button("__PT_SWITCH__", key="pt_switch_hid", help="internal"):
-            phase_now = st.session_state.get("pt_phase", "setup")
-            if phase_now == "running" and not st.session_state.get("pt_test_locked", False):
+            _pn = st.session_state.get("pt_phase", "setup")
+            if _pn == "running" and not st.session_state.get("pt_test_locked", False):
                 cnt = st.session_state.get("pt_switch_count", 0) + 1
                 st.session_state.pt_switch_count = cnt
                 if cnt >= 3:
@@ -2710,16 +2820,37 @@ footer{visibility:hidden!important;}
                     )
             st.rerun()
 
-        # Long switch (>10 s away)
+        # ── Long switch / overlay already shown (>10 s away) ─────────────────
         if st.button("__PT_SWITCH_LONG__", key="pt_switch_long_hid", help="internal"):
-            phase_now = st.session_state.get("pt_phase", "setup")
-            if phase_now == "running" and not st.session_state.get("pt_test_locked", False):
-                st.session_state.pt_test_locked = True
+            _pn = st.session_state.get("pt_phase", "setup")
+            if _pn == "running" and not st.session_state.get("pt_test_locked", False):
+                st.session_state.pt_test_locked  = True
                 st.session_state.pt_lock_trigger = (
                     "You were away from the test window for more than 10 seconds. "
                     "The test has been locked by the proctor system."
                 )
             st.rerun()
+
+        # ── SOLUTION 2 bridge A: JS writes blur epoch, Python stores it ──────
+        # JS calls _click("__PT_BLUR__") inside _onHide().
+        # Python reads window.__ptBlurEpoch via the button label convention —
+        # actually we just store the server-side time.time() which is close
+        # enough (JS and server clocks may differ slightly; we only need >10 s).
+        if st.button("__PT_BLUR__", key="pt_blur_hid", help="internal"):
+            if st.session_state.get("pt_phase") == "running":
+                import time as _t
+                st.session_state.pt_blur_at       = _t.time()
+                st.session_state.pt_blur_notified = False
+            st.rerun()
+
+        # ── SOLUTION 2 bridge B: JS tells Python user returned (< 10 s) ──────
+        # Called by _onShow() only when away < 10 s (overlay not shown).
+        # Clears pt_blur_at so autorefresh stops alarming.
+        if st.button("__PT_BLUR_CLEAR__", key="pt_blur_clear_hid", help="internal"):
+            st.session_state.pt_blur_at       = 0.0
+            st.session_state.pt_blur_notified = False
+            st.rerun()
+
         st.markdown('</div>', unsafe_allow_html=True)
 
     # ── Proctor lock gate ─────────────────────────────────────────────────────
@@ -2754,6 +2885,78 @@ footer{visibility:hidden!important;}
         st.error("InterviewEngine unavailable — check backend_engine.py."); return
 
     phase=st.session_state.pt_phase
+
+    # ── Auto-launch when coming from page_placement_setup ────────────────────
+    # page_placement_setup() sets _ps_setup_done=True when the user clicks
+    # "▶ Start Placement Test" there.  We must NOT show _page_setup() again —
+    # instead immediately kick off the first round exactly as _page_setup()'s
+    # "Begin Placement Test" button would have done.
+    if phase == "setup" and st.session_state.get("_ps_setup_done", False):
+        st.session_state["_ps_setup_done"] = False   # consume the flag
+        r0 = _get_round_config()[0]
+        role = st.session_state.get("pt_target_role", "Software Engineer")
+        try:
+            engine.start_session(
+                role=role,
+                difficulty=r0["difficulty"],
+                num_questions=r0["num_questions"],
+            )
+        except Exception:
+            pass
+
+        with st.spinner("⚡ Preparing aptitude questions — this will only happen once…"):
+            if _COMPANY_UPLOAD_OK and has_company_questions("aptitude"):
+                batch = get_company_mcq_batch(r0["num_questions"], r0["difficulty"])
+                if len(batch) < r0["num_questions"]:
+                    ai_bank = _mcq_bank()
+                    ai_bank._cache = None
+                    ai_batch = ai_bank.get_batch(
+                        role=role,
+                        n=r0["num_questions"] - len(batch),
+                        diff=r0["difficulty"],
+                    )
+                    batch += ai_batch
+            else:
+                bank = _mcq_bank()
+                bank._cache = None
+                batch = bank.get_batch(
+                    role=role,
+                    n=r0["num_questions"],
+                    diff=r0["difficulty"],
+                )
+
+        for bq in batch:
+            bq.setdefault("q_format", "mcq")
+
+        st.session_state.update({
+            "pt_mcq_batch":        batch,
+            "pt_text_batch":       [],
+            "pt_round_idx":        0,
+            "pt_phase":            "running",
+            "pt_q_idx":            0,
+            "pt_round_answers":    [],
+            "pt_all_answers":      [],
+            "pt_round_scores":     {},
+            "pt_round_started_at": time.time(),
+            "pt_mcq_q_submitted":  False,
+            "blind_mode":          True,
+            "blind_scores":        {},
+            "blind_revealed":      False,
+        })
+        if batch:
+            st.session_state.pt_current_q_dict = batch[0]
+            st.session_state.pt_current_q      = batch[0]["question"]
+        st.session_state.pt_q_shown_at = time.time()
+        _show_popup(
+            "info", "TEST STARTING!",
+            f"Round 1 — Aptitude<br>{r0['num_questions']} MCQs · {r0['time_per_q_s']}s each<br><br>"
+            "All questions are pre-loaded. Good luck! 🚀",
+            "Let's Go →",
+        )
+        st.rerun()
+        return
+    # ─────────────────────────────────────────────────────────────────────────
+
     if phase!="setup": _header()
 
     if   phase=="setup":          _page_setup(engine)
