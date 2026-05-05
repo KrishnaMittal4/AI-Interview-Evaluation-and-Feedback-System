@@ -111,6 +111,18 @@ except ImportError:
     JD_ENGINE_OK = False
     JD_ENGINE_DEFAULTS = {}
     def render_company_selector(): pass
+
+# ── Feature 05: Company Culture Fit Predictor ─────────────────────────────────
+try:
+    from culture_fit_engine import (
+        render_culture_fit_section,
+        CULTURE_FIT_DEFAULTS,
+    )
+    CULTURE_FIT_OK = True
+except ImportError:
+    CULTURE_FIT_OK = False
+    CULTURE_FIT_DEFAULTS = {}
+    def render_culture_fit_section(*a, **kw): pass
 from finish_interview       import _build_pdf
 from hr_round               import page_hr_round
 from live_coach             import generate_coaching_tip, render_coach_card, render_coach_settings
@@ -375,6 +387,8 @@ DEFAULTS.update(RESUME_DEFAULTS)
 DEFAULTS.update(FOLLOW_UP_DEFAULTS)
 DEFAULTS.update(JD_ENGINE_DEFAULTS)
 DEFAULTS.update(WEEKLY_PLAN_DEFAULTS)          # v10.1 — Weekly Prep Plan
+if CULTURE_FIT_OK:
+    DEFAULTS.update(CULTURE_FIT_DEFAULTS)      # Feature 05 — Culture Fit Predictor
 if _PT_OK:
     DEFAULTS.update(_PT_DEFAULTS)              # Placement Test session state
 if _CQ_OK:
@@ -4526,6 +4540,7 @@ body{{background:transparent;font-family:Inter,sans-serif;}}
                     st.session_state["last_audio_source"] = None
                     st.session_state.pop("_bstt_last_audio_bytes", None)      # Browser STT backup
                     st.session_state.pop(f"_whisper_last_audio_bytes_{qn}", None)  # Whisper backup
+                    st.session_state.pop(f"_whisper_audio_id_{qn}", None)     # Dedup key — cleared so next recording for same q_number is not skipped
                     vs_summary = engine.get_voice_session_summary()
                     mm_conf    = engine.get_multimodal_confidence()
                     st.session_state.session_answers.append({
@@ -6082,6 +6097,21 @@ def page_report() -> None:
         f'{_weakest_name} competency · Groq LLaMA-3.3-70B</div>',
         unsafe_allow_html=True,
     )
+
+    # ══════════════════════════════════════════════════════════════════════════
+    #  COMPANY CULTURE FIT PREDICTOR (Feature 05)
+    # ══════════════════════════════════════════════════════════════════════════
+    if CULTURE_FIT_OK and answers:
+        import os as _os_cf
+        _cf_groq_key  = _os_cf.environ.get("GROQ_API_KEY", os.environ.get("GROQ_API_KEY", ""))
+        _cf_target_co = st.session_state.get("target_company", "")
+        _cf_accent, _, _ = get_role_theme(st.session_state.get("target_role", "Software Engineer"))
+        render_culture_fit_section(
+            answers      = answers,
+            target_co    = _cf_target_co,
+            groq_api_key = _cf_groq_key,
+            accent_color = _cf_accent,
+        )
 
     rc1, rc2, rc3 = st.columns(3)
     with rc1:
