@@ -1493,7 +1493,7 @@ div[data-testid="stButton"].mcq-next > button:hover{
 
     # Circumference for r=34: 2π×34 ≈ 213.6 — used for stroke-dasharray
     _circ = 213.6
-    # Question card with SVG ring timer replacing flat text timer
+    # ── Question card HTML only (no <script> tags — those live in components.html below) ──
     st.markdown(f"""
 <div class="mcq-card">
   <div class="mcq-inner">
@@ -1503,7 +1503,7 @@ div[data-testid="stButton"].mcq-next > button:hover{
         <span class="mcq-topic">{topic.upper()}</span>
         <span class="mcq-qnum" style="margin-left:4px">Q {qi+1} / {nq}</span>
       </div>
-      <!-- SVG ring countdown -->
+      <!-- SVG ring countdown — numbers updated by the components.html script below -->
       <div class="mcq-ring-wrap" id="mcq-ring-wrap-{ukey}">
         <svg width="80" height="80" viewBox="0 0 80 80">
           <circle class="mcq-ring-track" cx="40" cy="40" r="34"/>
@@ -1521,33 +1521,31 @@ div[data-testid="stButton"].mcq-next > button:hover{
     <div class="mcq-qtext">{qtext}</div>
   </div>
 </div>
+<div style="margin-bottom:6px"></div>
+""", unsafe_allow_html=True)
+
+    # ── Timer + stagger animations in components.html (isolated iframe — no blink, no raw-code leak) ──
+    # The timer JS drives the SVG ring in the PARENT document via window.parent.document.getElementById.
+    # On expiry it posts PT_TIMER_EXPIRED so the existing pt_adv_hid bridge fires auto-advance.
+    components.html(f"""
 <script>
 (function(){{
+  /* ── 1. SVG ring countdown ── */
   var TOTAL={tpq}, rem={elap};
   var CIRC={_circ};
-  var ring=document.getElementById('mcq-ring-{ukey}');
-  var num=document.getElementById('mcq-rnum-{ukey}');
-  var wrap=document.getElementById('mcq-ring-wrap-{ukey}');
+  var P=window.parent.document;
+  var ring=P.getElementById('mcq-ring-{ukey}');
+  var num =P.getElementById('mcq-rnum-{ukey}');
   if(!ring||!num) return;
 
   function _update(){{
-    var pct=rem/TOTAL;
-    var offset=CIRC*(1-pct);
-    ring.style.strokeDashoffset=offset;
-
-    if(rem<=10){{
-      ring.style.stroke='#ff3366';
-      num.style.color='#ff3366';
-    }} else if(rem<=20){{
-      ring.style.stroke='#f59e0b';
-      num.style.color='#f59e0b';
-    }} else {{
-      ring.style.stroke='#00ff88';
-      num.style.color='#00ff88';
-    }}
+    var pct=Math.max(0,rem)/TOTAL;
+    ring.style.strokeDashoffset=CIRC*(1-pct);
+    if(rem<=10){{ring.style.stroke='#ff3366';num.style.color='#ff3366';}}
+    else if(rem<=20){{ring.style.stroke='#f59e0b';num.style.color='#f59e0b';}}
+    else{{ring.style.stroke='#00ff88';num.style.color='#00ff88';}}
     num.textContent=rem>=60?(Math.floor(rem/60)+':'+(rem%60<10?'0':'')+rem%60):rem;
   }}
-
   _update();
   var iv=setInterval(function(){{
     rem=Math.max(0,rem-1);
@@ -1555,17 +1553,14 @@ div[data-testid="stButton"].mcq-next > button:hover{
     if(rem===0){{
       clearInterval(iv);
       num.textContent='✕';
+      window.parent.postMessage({{type:'PT_TIMER_EXPIRED',key:'{ukey}'}},'*');
     }}
   }},1000);
-}})();
-</script>
 
-<script>
-/* ── Stagger entrance for option buttons ── */
-(function(){{
+  /* ── 2. Stagger-entrance for option buttons (runs in parent document) ── */
   var DELAY=[120,220,320,420];
   function _stagger(){{
-    var btns=document.querySelectorAll(
+    var btns=P.querySelectorAll(
       'div[data-testid="stButton"].mcq-opt > button,' +
       'div[data-testid="stButton"].mcq-opt-sel > button'
     );
@@ -1574,45 +1569,40 @@ div[data-testid="stButton"].mcq-next > button:hover{
       b.style.transform='translateX(-18px)';
       b.style.transition='none';
       setTimeout(function(){{
-        b.style.transition='opacity .28s ease, transform .28s cubic-bezier(.22,1,.36,1)';
+        b.style.transition='opacity .28s ease,transform .28s cubic-bezier(.22,1,.36,1)';
         b.style.opacity='1';
         b.style.transform='translateX(0)';
-      }}, DELAY[i]||i*80);
+      }},DELAY[i]||i*80);
     }});
   }}
-  /* Run after Streamlit finishes painting */
-  setTimeout(_stagger, 60);
+  setTimeout(_stagger,60);
 
-  /* ── Ripple on click ── */
+  /* ── 3. Ripple on click ── */
   function _addRipple(btn){{
-    btn.addEventListener('click', function(e){{
-      var rip=document.createElement('span');
+    btn.addEventListener('click',function(e){{
+      var rip=P.createElement('span');
       var rect=btn.getBoundingClientRect();
       rip.style.cssText='position:absolute;left:'+(e.clientX-rect.left)+'px;top:'+(e.clientY-rect.top)+'px;'
         +'width:24px;height:24px;border-radius:50%;background:rgba(0,212,255,.55);pointer-events:none;'
         +'animation:mcq-ripple 0.55s ease-out forwards;';
       btn.style.overflow='hidden';
       btn.appendChild(rip);
-      setTimeout(function(){{rip.remove();}}, 600);
-    }}, {{once:false, passive:true}});
+      setTimeout(function(){{rip.remove();}},600);
+    }},{{once:false,passive:true}});
   }}
   function _attachRipples(){{
-    var btns=document.querySelectorAll(
+    var btns=P.querySelectorAll(
       'div[data-testid="stButton"].mcq-opt > button,' +
       'div[data-testid="stButton"].mcq-opt-sel > button'
     );
     btns.forEach(function(b){{
-      if(!b.dataset.rippleAttached){{
-        _addRipple(b);
-        b.dataset.rippleAttached='1';
-      }}
+      if(!b.dataset.rippleAttached){{_addRipple(b);b.dataset.rippleAttached='1';}}
     }});
   }}
   setTimeout(_attachRipples,100);
 }})();
 </script>
-<div style="margin-bottom:6px"></div>
-""", unsafe_allow_html=True)
+""", height=0, scrolling=False)
 
     # ── Options (real Streamlit buttons) ──────────────────────────────────────
     sorted_opts = sorted(opts.items())
