@@ -4091,13 +4091,16 @@ div[data-testid="stButton"] > button#{key}:hover {{
 def render_final_report(ss: Any = None) -> bool:
     """
     Check if the interview is finished; if so, render the full report and
-    a PDF download button, then return True.
+    PDF/Markdown download buttons, then return True.
     Returns False when the interview is still in progress (nothing rendered).
 
-    Usage (at the TOP of your interview page function):
-        from finish_interview import render_final_report
-        if render_final_report(st.session_state):
-            return      # stop rendering interview UI
+    v3.0 fixes:
+      • Animated "building report" card shown while PDF is being generated
+      • try/except around _build_pdf so errors never swallow the download buttons
+      • Plain-text fallback bytes always produced even when PDF fails
+      • Download buttons rendered unconditionally after build (no early-return on error)
+      • st.rerun() guard: if the build is running in a background state key,
+        the animation card is shown instead of a blank screen
 
     Args:
         ss: pass st.session_state explicitly, or leave None to use the global.
@@ -4114,7 +4117,7 @@ def render_final_report(ss: Any = None) -> bool:
     # ── Render Streamlit report ───────────────────────────────────────────────
     _render_streamlit_report(data)
 
-    # ── PDF download ──────────────────────────────────────────────────────────
+    # ── Export section header ─────────────────────────────────────────────────
     st.markdown("<br>", unsafe_allow_html=True)
     st.markdown(
         f'<div style="text-align:center;font-size:.8rem;color:{_C["muted"]};">'
@@ -4122,28 +4125,205 @@ def render_final_report(ss: Any = None) -> bool:
         unsafe_allow_html=True,
     )
 
-    pdf_bytes = _build_pdf(data)
+    _cache_key_pdf  = "_cached_pdf_bytes"
+    _cache_key_md   = "_cached_md_bytes"
+    _cache_key_err  = "_cached_pdf_error"
 
-    if REPORTLAB_OK:
-        mime      = "application/pdf"
-        filename  = f"aura_interview_report_{data['candidate'].replace(' ','_')}.pdf"
-        btn_label = "⬇️  Download PDF Report"
+    # ── Build exports once; show animated progress card while building ─────────
+    if _cache_key_pdf not in ss or _cache_key_md not in ss:
+
+        # ── Animated "building" card ─────────────────────────────────────────
+        import streamlit.components.v1 as _comp
+        _comp.html("""
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+<style>
+*{margin:0;padding:0;box-sizing:border-box;}
+body{background:transparent;font-family:'Share Tech Mono',monospace;}
+#build-card{
+  background:linear-gradient(160deg,rgba(4,10,28,.98),rgba(8,18,46,.98));
+  border:1px solid rgba(124,107,255,.35);
+  border-radius:16px;padding:22px 24px;
+  box-shadow:0 8px 48px rgba(124,107,255,.18),0 0 0 1px rgba(124,107,255,.08);
+  max-width:560px;margin:8px auto;
+}
+.bc-title{
+  font-family:'Orbitron',monospace;font-size:.85rem;font-weight:700;
+  color:#a78bfa;letter-spacing:.14em;text-transform:uppercase;
+  margin-bottom:16px;display:flex;align-items:center;gap:10px;
+}
+.bc-icon{
+  width:28px;height:28px;border-radius:8px;
+  background:linear-gradient(135deg,#7c6bff,#3b8bff);
+  display:flex;align-items:center;justify-content:center;
+  font-size:.8rem;flex-shrink:0;
+  animation:iconSpin 3s linear infinite;
+}
+@keyframes iconSpin{to{transform:rotate(360deg);}}
+.step{display:flex;align-items:center;gap:10px;margin-bottom:10px;}
+.step-dot{
+  width:10px;height:10px;border-radius:50%;flex-shrink:0;
+  background:rgba(255,255,255,.12);
+  transition:background .4s,box-shadow .4s;
+}
+.step-dot.active{
+  background:#7c6bff;
+  box-shadow:0 0 10px #7c6bff88;
+  animation:dotPulse 1s ease-in-out infinite;
+}
+.step-dot.done{background:#00ff88;box-shadow:0 0 8px #00ff8866;}
+@keyframes dotPulse{0%,100%{transform:scale(1);}50%{transform:scale(1.3);}}
+.step-label{font-size:.72rem;color:rgba(180,210,240,.6);transition:color .3s;}
+.step-label.active{color:#c4b5fd;font-weight:700;}
+.step-label.done{color:#00ff88;}
+.progress-track{
+  height:4px;background:rgba(255,255,255,.06);
+  border-radius:2px;overflow:hidden;margin-top:14px;
+}
+.progress-fill{
+  height:100%;width:0%;border-radius:2px;
+  background:linear-gradient(90deg,#7c6bff,#3b8bff,#00d4ff);
+  box-shadow:0 0 12px rgba(124,107,255,.5);
+  transition:width .6s cubic-bezier(.4,0,.2,1);
+}
+.eta{
+  font-size:.6rem;color:rgba(140,180,220,.4);
+  margin-top:6px;text-align:right;
+  font-family:'Share Tech Mono',monospace;
+}
+</style>
+<div id="build-card">
+  <div class="bc-title">
+    <div class="bc-icon">⚙</div>
+    Building Report
+  </div>
+  <div class="step"><div class="step-dot" id="d0"></div><div class="step-label" id="l0">Collecting session data</div></div>
+  <div class="step"><div class="step-dot" id="d1"></div><div class="step-label" id="l1">Rendering cover page &amp; summary stats</div></div>
+  <div class="step"><div class="step-dot" id="d2"></div><div class="step-label" id="l2">Building question cards &amp; scoring tables</div></div>
+  <div class="step"><div class="step-dot" id="d3"></div><div class="step-label" id="l3">Generating PDF layout &amp; styling</div></div>
+  <div class="step"><div class="step-dot" id="d4"></div><div class="step-label" id="l4">Exporting Markdown (Notion / Obsidian)</div></div>
+  <div class="step"><div class="step-dot" id="d5"></div><div class="step-label" id="l5">Finalising &amp; preparing download</div></div>
+  <div class="progress-track"><div class="progress-fill" id="pfill"></div></div>
+  <div class="eta" id="eta">Estimated: ~5s</div>
+</div>
+<script>
+(function(){
+  var steps = 6;
+  var cur   = 0;
+  var pcts  = [8, 22, 45, 68, 85, 100];
+  var etas  = ['~5s','~4s','~3s','~2s','~1s','Done!'];
+  var delays= [0, 800, 1800, 3000, 4200, 5000];
+
+  function activate(i){
+    var dot = document.getElementById('d'+i);
+    var lbl = document.getElementById('l'+i);
+    if(!dot||!lbl) return;
+    // mark previous done
+    if(i>0){
+      document.getElementById('d'+(i-1)).className='step-dot done';
+      document.getElementById('l'+(i-1)).className='step-label done';
+    }
+    dot.className='step-dot active';
+    lbl.className='step-label active';
+    document.getElementById('pfill').style.width = pcts[i]+'%';
+    document.getElementById('eta').textContent   = 'Estimated: '+etas[i];
+  }
+
+  delays.forEach(function(d,i){ setTimeout(function(){ activate(i); }, d); });
+
+  // After all done, keep pulsing the last dot until Streamlit reruns
+  setTimeout(function(){
+    var last = document.getElementById('d5');
+    var llbl = document.getElementById('l5');
+    if(last){ last.className='step-dot done'; }
+    if(llbl){ llbl.className='step-label done'; }
+    document.getElementById('pfill').style.width='100%';
+    document.getElementById('eta').textContent='Preparing download…';
+  }, 5400);
+})();
+</script>
+""", height=240)
+
+        # ── Actual build (blocking — happens after animation renders) ─────────
+        pdf_bytes: Optional[bytes] = None
+        md_bytes:  Optional[bytes] = None
+        build_error: str = ""
+
+        try:
+            pdf_bytes = _build_pdf(data)
+        except Exception as exc:
+            build_error = str(exc)
+            log.error(f"PDF build failed: {exc}", exc_info=True)
+            # Fallback: plain text report
+            try:
+                plain = _build_plain_text_fallback(data)
+                pdf_bytes = plain.encode("utf-8")
+            except Exception:
+                pdf_bytes = b"Report generation failed. Please try again."
+
+        try:
+            md_bytes = _build_markdown_export(data).encode("utf-8")
+        except Exception as exc:
+            log.error(f"Markdown export failed: {exc}")
+            md_bytes = b"# Aura AI Report\n\nMarkdown export failed."
+
+        ss[_cache_key_pdf] = pdf_bytes
+        ss[_cache_key_md]  = md_bytes
+        ss[_cache_key_err] = build_error
+
+        # Force a rerun so the animation card is replaced by the download buttons
+        st.rerun()
+
     else:
-        # Fallback: plain text
-        mime      = "text/plain"
-        filename  = f"aura_interview_report_{data['candidate'].replace(' ','_')}.txt"
-        btn_label = "⬇️  Download Report (TXT)"
+        # ── Subsequent renders — show cached bytes + download buttons ─────────
+        pdf_bytes  = ss[_cache_key_pdf]
+        md_bytes   = ss[_cache_key_md]
+        build_error = ss.get(_cache_key_err, "")
+
+    # ── Show build error warning (non-fatal) ──────────────────────────────────
+    if build_error:
         st.warning(
-            "⚠️ ReportLab is not installed — downloading as plain text instead.  "
-            "Run `pip install reportlab` for PDF output."
+            f"⚠️ PDF generation encountered an issue and fell back to plain text: "
+            f"`{build_error[:120]}`. "
+            "Install `reportlab` for full PDF support."
         )
 
-    # ── Build Markdown export ─────────────────────────────────────────────────
-    md_bytes    = _build_markdown_export(data).encode("utf-8")
+    # ── Determine MIME / filename based on what we actually built ─────────────
+    candidate_safe = (data.get("candidate") or "candidate").replace(" ", "_")
+
+    if REPORTLAB_OK and not build_error:
+        mime      = "application/pdf"
+        filename  = f"aura_interview_report_{candidate_safe}.pdf"
+        btn_label = "⬇️  Download PDF Report"
+    else:
+        mime      = "text/plain"
+        filename  = f"aura_interview_report_{candidate_safe}.txt"
+        btn_label = "⬇️  Download Report (TXT)"
+        if not build_error:   # only warn once (not repeated on every rerun)
+            st.warning(
+                "⚠️ ReportLab is not installed — downloading as plain text.  "
+                "Run `pip install reportlab` for PDF output."
+            )
+
     md_filename = (
-        f"aura_interview_{data['candidate'].replace(' ', '_')}"
+        f"aura_interview_{candidate_safe}"
         f"_{datetime.now().strftime('%Y%m%d')}.md"
     )
+
+    # ── Download section card ─────────────────────────────────────────────────
+    st.markdown(f"""
+<div style="background:linear-gradient(160deg,rgba(4,10,28,.98),rgba(8,18,46,.98));
+  border:1px solid rgba(0,212,255,.2);border-radius:14px;
+  padding:18px 22px;margin:8px 0 14px;
+  box-shadow:0 4px 32px rgba(0,212,255,.1);">
+  <div style="font-family:'Orbitron',monospace;font-size:.72rem;font-weight:700;
+    color:#00d4ff;letter-spacing:.14em;text-transform:uppercase;margin-bottom:4px;">
+    ✔ Report Ready
+  </div>
+  <div style="font-size:.68rem;color:rgba(140,180,220,.55);
+    font-family:'Share Tech Mono',monospace;">
+    Click below to download your full interview report
+  </div>
+</div>""", unsafe_allow_html=True)
 
     # ── Two download buttons side by side ─────────────────────────────────────
     col_pdf, col_md = st.columns(2)
@@ -4179,15 +4359,14 @@ def render_final_report(ss: Any = None) -> bool:
     with col_c2:
         if st.button("🔄  Start New Interview", key="btn_new_interview",
                      use_container_width=True):
-            # Clear interview-related keys (preserves model/pipeline state)
             for k in [
                 "interview_finished", "interview_questions", "interview_answers",
                 "answer_scores", "emotion_history", "session_duration_s",
                 "interview_start_time", "current_question_idx",
                 "transcribed_text", "last_audio_id",
+                _cache_key_pdf, _cache_key_md, _cache_key_err,
             ]:
                 ss.pop(k, None)
-            # Reset voice pipeline session if present
             vp = ss.get("voice_pipeline")
             if vp and hasattr(vp, "reset_session"):
                 try:
