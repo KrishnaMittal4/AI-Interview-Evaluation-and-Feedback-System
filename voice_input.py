@@ -1,5 +1,5 @@
 """
-voice_input.py — Aura AI | Unified Voice Module (v9.1)
+voice_input.py — Aura AI | Unified Voice Module (v9.2)
 =======================================================
 Merged from three separate files:
   • speech_to_text.py        (v5.3) — Whisper ASR engine
@@ -8,10 +8,16 @@ Merged from three separate files:
 
 SECTION 1 — SpeechToText (Whisper ASR)
 ───────────────────────────────────────
-v5.3: Accent-adaptive model selection + auto-downgrade chain.
-  • DEFAULT_MODEL: openai/whisper-small  (best accuracy/speed balance)
-  • Auto-downgrade: small → base → tiny on OOM / missing weights
-  • Override via AURA_WHISPER_MODEL env var for zero-code deployment changes
+v9.2: LOCAL-FIRST Whisper backend (offline-capable).
+  • PRIMARY:  openai-whisper  (pip install openai-whisper)
+              Runs fully offline after first download. Weights cached to
+              ~/.cache/whisper — no internet needed on subsequent runs.
+              Placement test timed rounds benefit most: no network latency.
+  • FALLBACK: HuggingFace transformers pipeline (existing v5.3 behaviour)
+              Used automatically when openai-whisper is not installed.
+  • Model selection and auto-downgrade chain unchanged from v5.3.
+  • AURA_WHISPER_BACKEND env var: set to "transformers" to force HF path.
+  • AURA_WHISPER_MODEL env var: override default model (both backends).
 
 SECTION 2 — Equalizer Widget (render_eq_widget / audio_waveform)
 ────────────────────────────────────────────────────────────────
@@ -53,14 +59,30 @@ warnings.filterwarnings("ignore")
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("STT")
 
+# ── Backend selection (v9.2) ──────────────────────────────────────────────────
+# LOCAL  = openai-whisper  (offline-capable, pip install openai-whisper)
+# HF     = HuggingFace transformers pipeline  (original v5.3 behaviour)
+# Force HF path:  export AURA_WHISPER_BACKEND=transformers
+_FORCE_HF_BACKEND = os.environ.get("AURA_WHISPER_BACKEND", "").lower() == "transformers"
+
+# ── openai-whisper availability ───────────────────────────────────────────────
+try:
+    import whisper as _openai_whisper          # pip install openai-whisper
+    OPENAI_WHISPER_OK = True
+except ImportError:
+    OPENAI_WHISPER_OK = False
+    _openai_whisper   = None  # type: ignore[assignment]
+
+# Use local backend unless forced off or not installed
+USE_LOCAL_WHISPER: bool = OPENAI_WHISPER_OK and not _FORCE_HF_BACKEND
+
 # ── Model selection ───────────────────────────────────────────────────────────
-# Default upgraded from whisper-base → whisper-small (v5.3).
-# Override via env var, e.g.:  export AURA_WHISPER_MODEL=openai/whisper-medium
+# openai-whisper uses short names ("small", "base", "tiny").
+# HuggingFace uses full names ("openai/whisper-small", …).
+# DEFAULT_MODEL stores the HF-style name; _to_local_name() strips the prefix.
 DEFAULT_MODEL = os.environ.get("AURA_WHISPER_MODEL", "openai/whisper-small")
 
-# Auto-downgrade chain: if the preferred model fails to load (OOM, missing
-# weights), _load() retries with each successive smaller model in order.
-# The chain is only walked on load failure, not on inference error.
+# Auto-downgrade chain (both backends): preferred → base → tiny on OOM/failure.
 WHISPER_MODEL_PRIORITY: List[str] = [
     "openai/whisper-small",   # default — best balance of accuracy vs speed
     "openai/whisper-base",    # fallback — 74 MB, still usable on low-RAM machines
@@ -68,16 +90,25 @@ WHISPER_MODEL_PRIORITY: List[str] = [
 ]
 
 # Per-model approximate CPU latency multipliers (relative to tiny = 1×).
-# Surfaced in SpeechToText.status so the UI can show users what to expect.
 _MODEL_LATENCY: dict = {
-    "openai/whisper-tiny":   "~1× (fastest)",
-    "openai/whisper-base":   "~2×",
-    "openai/whisper-small":  "~4–5× (default)",
-    "openai/whisper-medium": "~12–15× (highest accuracy)",
-    "openai/whisper-large":  "~20–25× (research grade)",
+    "openai/whisper-tiny":     "~1× (fastest)",
+    "openai/whisper-base":     "~2×",
+    "openai/whisper-small":    "~4–5× (default)",
+    "openai/whisper-medium":   "~12–15× (highest accuracy)",
+    "openai/whisper-large":    "~20–25× (research grade)",
     "openai/whisper-large-v2": "~20–25× (research grade)",
     "openai/whisper-large-v3": "~20–25× (research grade)",
 }
+
+
+def _to_local_name(hf_model_name: str) -> str:
+    """
+    Convert HF-style model name to openai-whisper short name.
+    "openai/whisper-small" → "small"
+    "openai/whisper-large-v2" → "large-v2"
+    Already short names ("small") are returned unchanged.
+    """
+    return hf_model_name.replace("openai/whisper-", "").replace("openai/", "")
 
 # ── Optional deps — flags ALWAYS defined at module level ─────────────────────
 # voice_input.py imports these directly:
@@ -218,22 +249,31 @@ def is_silent(audio: np.ndarray, threshold: float = 5e-3) -> bool:
 class SpeechToText:
     """
     Whisper-based ASR with robust multi-format audio decoding and
-    accent-adaptive model selection (v5.3).
+    accent-adaptive model selection (v9.2 — local-first).
+
+    Backend priority:
+      1. openai-whisper  (LOCAL — offline-capable, faster on repeat runs)
+         Weights cached to ~/.cache/whisper after first download.
+         Install: pip install openai-whisper
+         Force off: export AURA_WHISPER_BACKEND=transformers
+      2. HuggingFace transformers pipeline  (original v5.3 fallback)
+         Used automatically when openai-whisper is not installed.
 
     Model selection (in priority order):
       1. Explicit model_name passed to __init__
       2. AURA_WHISPER_MODEL environment variable
       3. DEFAULT_MODEL (openai/whisper-small)
 
-    If the chosen model fails to load (OOM, missing weights), _load()
-    automatically retries with each model in WHISPER_MODEL_PRIORITY until
-    one succeeds.  The finally-loaded model name is stored in self.model_name
-    so callers always know which model is actually running.
+    Auto-downgrade: if the preferred model fails to load (OOM, missing
+    weights), _load() retries with each model in WHISPER_MODEL_PRIORITY
+    until one succeeds.  Works identically on both backends.
     """
 
     def __init__(self, model_name: str = DEFAULT_MODEL) -> None:
         self.model_name    = model_name   # may be updated by downgrade chain
-        self._pipe         = None
+        self._pipe         = None         # HF pipeline handle (HF backend)
+        self._local_model  = None         # openai-whisper model (local backend)
+        self._backend      = "none"       # "local" | "transformers" | "none"
         self._ready        = False
         self._error_msg    = ""
         self._downgraded   = False        # True if a smaller model was used
@@ -241,12 +281,38 @@ class SpeechToText:
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 
-    def _try_load_model(self, model_name: str) -> bool:
+    def _try_load_local(self, model_name: str) -> bool:
         """
-        Attempt to load a single Whisper model via HuggingFace pipeline.
+        Load a model via openai-whisper (offline-capable).
+        model_name may be HF-style ("openai/whisper-small") or short ("small").
+        Weights are cached to ~/.cache/whisper — no internet on repeat runs.
         Returns True on success, False on any failure.
-        Populates self._pipe and self.model_name on success.
         """
+        if not OPENAI_WHISPER_OK:
+            return False
+        short = _to_local_name(model_name)
+        try:
+            log.info(f"[local-whisper] Loading '{short}' …")
+            model = _openai_whisper.load_model(short)
+            self._local_model = model
+            self.model_name   = model_name   # keep HF-style name for status display
+            self._backend     = "local"
+            log.info(
+                f"[local-whisper] Ready: {short}  "
+                f"latency={_MODEL_LATENCY.get(model_name, 'unknown')}"
+            )
+            return True
+        except Exception as exc:
+            log.warning(f"[local-whisper] Failed to load '{short}': {exc}")
+            return False
+
+    def _try_load_hf(self, model_name: str) -> bool:
+        """
+        Load a model via HuggingFace transformers pipeline (original v5.3 path).
+        Returns True on success, False on any failure.
+        """
+        if not TRANSFORMERS_OK or not TORCH_OK:
+            return False
         try:
             device = 0 if (TORCH_OK and torch.cuda.is_available()) else -1
             pipe = hf_pipeline(
@@ -259,16 +325,30 @@ class SpeechToText:
             )
             self._pipe      = pipe
             self.model_name = model_name
-            latency_hint    = _MODEL_LATENCY.get(model_name, "unknown latency")
+            self._backend   = "transformers"
             log.info(
-                f"Whisper ready: {model_name}  "
+                f"[hf-whisper] Ready: {model_name}  "
                 f"device={'cuda' if device == 0 else 'cpu'}  "
-                f"latency={latency_hint}"
+                f"latency={_MODEL_LATENCY.get(model_name, 'unknown')}"
             )
             return True
         except Exception as exc:
-            log.warning(f"Failed to load {model_name}: {exc}")
+            log.warning(f"[hf-whisper] Failed to load {model_name}: {exc}")
             return False
+
+    def _try_load_model(self, model_name: str) -> bool:
+        """
+        Try loading model_name — local backend first, HF fallback.
+        Called by _load() and switch_model() for each candidate in the chain.
+        """
+        if USE_LOCAL_WHISPER:
+            if self._try_load_local(model_name):
+                return True
+            log.warning(
+                f"[local-whisper] '{model_name}' failed — "
+                f"falling back to HF transformers for this model."
+            )
+        return self._try_load_hf(model_name)
 
     def _load(self) -> None:
         """
@@ -277,34 +357,28 @@ class SpeechToText:
         Strategy:
           1. Try self.model_name (the caller's preferred model).
           2. If that fails, walk WHISPER_MODEL_PRIORITY from the top.
-             Skip any model already tried (self.model_name).
-          3. If every model in the chain fails, set error state.
-
-        This means:
-          • SpeechToText()                    → tries small, falls back to base/tiny
-          • SpeechToText("openai/whisper-medium") → tries medium, falls back to small/base/tiny
-          • SpeechToText("openai/whisper-tiny")   → tries tiny only (already at bottom)
+          3. If every model fails, set error state.
         """
-        if not TRANSFORMERS_OK:
+        # Pre-flight: at least one backend must be available
+        if not OPENAI_WHISPER_OK and not TRANSFORMERS_OK:
             self._error_msg = (
-                "transformers not installed. "
-                "Run: pip install transformers"
+                "No Whisper backend found. "
+                "Run: pip install openai-whisper   (recommended)\n"
+                "  or: pip install transformers torch"
             )
             log.warning(self._error_msg)
             return
-        if not TORCH_OK:
+        if not OPENAI_WHISPER_OK and not TORCH_OK:
             self._error_msg = (
-                "torch not installed. "
-                "Run: pip install torch"
+                "torch not installed (required for transformers backend). "
+                "Run: pip install torch   or: pip install openai-whisper"
             )
             log.warning(self._error_msg)
             return
 
-        # Build the ordered list of models to try: preferred first, then chain
-        already_tried: set = set()
+        # Build ordered candidate list: preferred model first, then chain
+        already_tried: set = {self.model_name}
         models_to_try: List[str] = [self.model_name]
-        already_tried.add(self.model_name)
-
         for m in WHISPER_MODEL_PRIORITY:
             if m not in already_tried:
                 models_to_try.append(m)
@@ -327,18 +401,83 @@ class SpeechToText:
         self._error_msg = (
             f"All Whisper models failed to load "
             f"(tried: {', '.join(models_to_try)}). "
-            f"Run: pip install transformers torch"
+            f"Run: pip install openai-whisper"
         )
         log.error(self._error_msg)
 
     # ── Public API ────────────────────────────────────────────────────────────
+
+    def _transcribe_local(self, audio: "np.ndarray", sr: int) -> str:
+        """
+        Run inference using the local openai-whisper model.
+        audio must be float32 mono at any sample rate (whisper resamples).
+        """
+        import tempfile, wave, os as _os
+        # openai-whisper accepts a numpy array directly via transcribe()
+        # but needs fp32 at 16kHz.  audio is already resampled by decode_audio().
+        try:
+            result = self._local_model.transcribe(audio, fp16=False)
+            return result.get("text", "").strip()
+        except Exception as exc:
+            log.warning(f"[local-whisper] Inference error, retrying via temp file: {exc}")
+            # Fallback: write to temp WAV and pass path
+            try:
+                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+                    tmp_path = tmp.name
+                import soundfile as _sf
+                _sf.write(tmp_path, audio, sr)
+                result = self._local_model.transcribe(tmp_path, fp16=False)
+                _os.unlink(tmp_path)
+                return result.get("text", "").strip()
+            except Exception as exc2:
+                log.error(f"[local-whisper] Temp-file fallback failed: {exc2}")
+                raise exc2
+
+    def _transcribe_chunked(self, audio: "np.ndarray", sr: int,
+                            chunk_s: int = 28, overlap_s: int = 2) -> str:
+        """
+        Transcribe long audio by splitting into overlapping chunks of `chunk_s`
+        seconds (with `overlap_s` seconds of overlap for continuity), then
+        joining the results.  Used automatically when audio > 30 s.
+
+        This avoids loading the entire recording into the model at once, which
+        can cause OOM on low-RAM machines and blocks the Streamlit UI thread
+        for the full duration.
+        """
+        chunk_samples   = chunk_s  * sr
+        overlap_samples = overlap_s * sr
+        step_samples    = chunk_samples - overlap_samples
+        total_samples   = len(audio)
+
+        if total_samples <= chunk_samples:
+            # Short enough — no chunking needed
+            return self._transcribe_local(audio, sr) if self._backend == "local" \
+                   else self._pipe({"sampling_rate": sr, "raw": audio}).get("text", "").strip()
+
+        pieces: list = []
+        start = 0
+        while start < total_samples:
+            end   = min(start + chunk_samples, total_samples)
+            chunk = audio[start:end]
+            try:
+                if self._backend == "local":
+                    piece = self._transcribe_local(chunk, sr)
+                else:
+                    piece = self._pipe({"sampling_rate": sr, "raw": chunk}).get("text", "").strip()
+                if piece:
+                    pieces.append(piece.strip())
+            except Exception as exc:
+                log.warning(f"[chunked-transcribe] chunk {start}-{end} failed: {exc}")
+            start += step_samples
+
+        return " ".join(pieces).strip()
 
     def transcribe(self, audio_bytes: bytes) -> str:
         """
         bytes → transcribed text string, or a descriptive error string.
 
         Error strings are always wrapped in square brackets so callers
-        can detect them: text.startswith("[") and text.endswith("]").
+        can detect them with: text.startswith("[")
         """
         if not audio_bytes or len(audio_bytes) < 100:
             return ""
@@ -354,12 +493,21 @@ class SpeechToText:
             return "[Recording too short — hold record while speaking]"
 
         try:
-            result = self._pipe({"sampling_rate": sr, "raw": audio})
-            text   = result.get("text", "").strip()
-            log.info(f"Transcribed ({len(audio)/sr:.1f}s): {text[:80]}")
+            duration_s = len(audio) / sr
+            if duration_s > 30:
+                # Long recording — chunk to avoid memory spikes / UI freeze
+                log.info(f"[transcribe] Long recording ({duration_s:.1f}s) — using chunked mode")
+                text = self._transcribe_chunked(audio, sr)
+            elif self._backend == "local":
+                text = self._transcribe_local(audio, sr)
+            else:
+                result = self._pipe({"sampling_rate": sr, "raw": audio})
+                text   = result.get("text", "").strip()
+
+            log.info(f"Transcribed ({len(audio)/sr:.1f}s) [{self._backend}]: {text[:80]}")
             return text if text else "[No speech detected]"
         except Exception as exc:
-            log.error(f"Whisper inference error: {exc}")
+            log.error(f"Whisper inference error [{self._backend}]: {exc}")
             return f"[Transcription error: {exc}]"
 
     def transcribe_file(self, path: str) -> str:
@@ -384,9 +532,11 @@ class SpeechToText:
                 ok = stt.switch_model(new_model)
                 st.success(...) if ok else st.error(...)
         """
-        old_pipe        = self._pipe
-        old_model_name  = self.model_name
-        old_ready       = self._ready
+        old_pipe         = self._pipe
+        old_local_model  = self._local_model
+        old_model_name   = self.model_name
+        old_backend      = self._backend
+        old_ready        = self._ready
 
         self._ready      = False
         self._downgraded = False
@@ -415,9 +565,11 @@ class SpeechToText:
                 return True
 
         # All candidates failed — restore previous working state
-        self._pipe      = old_pipe
-        self.model_name = old_model_name
-        self._ready     = old_ready
+        self._pipe         = old_pipe
+        self._local_model  = old_local_model
+        self.model_name    = old_model_name
+        self._backend      = old_backend
+        self._ready        = old_ready
         self._error_msg = (
             f"Failed to load {model_name} (and all fallbacks); "
             f"still using {old_model_name}"
@@ -446,17 +598,27 @@ class SpeechToText:
         return _MODEL_LATENCY.get(self.model_name, "unknown")
 
     @property
+    def backend(self) -> str:
+        """Active backend: 'local' (openai-whisper) | 'transformers' | 'none'."""
+        return self._backend
+
+    @property
     def status(self) -> str:
         """
         One-line status string for display in the Streamlit sidebar / Settings.
         Examples:
-            ✅ Whisper ready  (openai/whisper-small  •  ~4–5× latency)
+            ✅ Whisper ready  [local]  (openai/whisper-small  •  ~4–5× latency)
+            ✅ Whisper ready  [transformers]  (openai/whisper-small  •  ~4–5× latency)
             ⚠ Whisper downgraded  (whisper-medium → whisper-small  •  low RAM)
-            ✗ STT unavailable: transformers not installed
+            ✗ STT unavailable: no backend installed
         """
         if not self._ready:
             return f"✗ STT unavailable: {self._error_msg or 'Not loaded'}"
-        base = f"✅ Whisper ready  ({self.model_name}  •  {self.latency_hint})"
+        backend_label = "🖥 local" if self._backend == "local" else "☁ transformers"
+        base = (
+            f"✅ Whisper ready  [{backend_label}]  "
+            f"({self.model_name}  •  {self.latency_hint})"
+        )
         if self._downgraded:
             base += "  ⚠ downgraded (low RAM — see logs)"
         return base
@@ -1059,21 +1221,19 @@ def whisper_post_hud(answer_text: str) -> None:
 
 def render_mic_diagnostic(stt) -> None:
     """Show mic status and package availability."""
-    # All flags are defined at module level in this combined file
-    # (SF_OK, PYDUB_OK, LIBROSA_OK, SCIPY_OK, TORCH_OK, TRANSFORMERS_OK)
-
     with st.expander("🔧 Microphone & STT Diagnostics", expanded=False):
         st.markdown(
             '<div style="color:#ffffff;font-size:.82rem;font-weight:600;margin-bottom:.4rem;">Package Status</div>',
             unsafe_allow_html=True,
         )
         checks = [
-            ("transformers", TRANSFORMERS_OK, "pip install transformers"),
-            ("torch",        TORCH_OK,        "pip install torch"),
-            ("soundfile",    SF_OK,           "pip install soundfile"),
-            ("pydub",        PYDUB_OK,        "pip install pydub  +  install ffmpeg"),
-            ("librosa",      LIBROSA_OK,      "pip install librosa"),
-            ("scipy",        SCIPY_OK,        "pip install scipy"),
+            ("openai-whisper", OPENAI_WHISPER_OK, "pip install openai-whisper  (recommended — offline)"),
+            ("transformers",   TRANSFORMERS_OK,   "pip install transformers"),
+            ("torch",          TORCH_OK,          "pip install torch"),
+            ("soundfile",      SF_OK,             "pip install soundfile"),
+            ("pydub",          PYDUB_OK,          "pip install pydub  +  install ffmpeg"),
+            ("librosa",        LIBROSA_OK,        "pip install librosa"),
+            ("scipy",          SCIPY_OK,          "pip install scipy"),
         ]
         for name, ok, fix in checks:
             icon  = "✅" if ok else "❌"
@@ -1099,10 +1259,20 @@ def render_mic_diagnostic(stt) -> None:
         )
         st.markdown(f'<div style="color:#8fc4e0;font-size:.78rem;">{stt.status}</div>', unsafe_allow_html=True)
 
+        # Show active backend with colour badge
+        backend_color = "#00ff88" if stt.backend == "local" else "#fbbf24"
+        backend_label = "🖥 local (offline-capable)" if stt.backend == "local" else "☁ transformers (cloud download)"
+        st.markdown(
+            f'<div style="font-size:.78rem;margin-top:.2rem;">'
+            f'Active backend: <span style="color:{backend_color};font-weight:700;">{backend_label}</span></div>',
+            unsafe_allow_html=True,
+        )
+
         st.markdown('<hr style="border-color:rgba(255,255,255,.08);margin:.5rem 0;">', unsafe_allow_html=True)
         st.markdown(
             '<div style="font-size:.78rem;color:#b0cce8;line-height:1.75;">'
             '<strong style="color:#c8e0f4;">Common fixes:</strong><br>'
+            '• Install <code style="color:#fcd34d;">openai-whisper</code> for offline / timed-test use<br>'
             '• Microphone needs <strong>HTTPS</strong> or <strong>localhost</strong><br>'
             '• Chrome/Edge required for Browser STT tab<br>'
             '• If audio records but transcription is empty: install <code style="color:#fcd34d;">pydub</code> + <code style="color:#fcd34d;">ffmpeg</code><br>'
@@ -1320,20 +1490,37 @@ def _build_whisper_mic_html(component_key: str) -> str:
     }}
   }}
 
-  function triggerWhisper() {{
-    // Locate Streamlit's native st.audio_input button in the parent frame
-    // and click it — try multiple selectors for resilience across ST versions.
+  function findAudioBtn(pd) {{
+    // Try multiple selectors for resilience across Streamlit versions
+    return pd.querySelector('[data-testid="stAudioInput"] button[kind="secondary"]')
+        || pd.querySelector('[data-testid="stAudioInput"] button')
+        || pd.querySelector('button[aria-label="Record"]')
+        || pd.querySelector('button[title="Record"]')
+        || pd.querySelector('button[aria-label="Stop recording"]')
+        || pd.querySelector('button[title="Stop recording"]');
+  }}
+
+  function clickAudioBtnWhenReady(maxWaitMs) {{
     var pd = window.parent.document;
-    var btn = pd.querySelector('[data-testid="stAudioInput"] button')
-           || pd.querySelector('button[aria-label="Record"]')
-           || pd.querySelector('button[title="Record"]');
-    if (btn) {{
-      btn.click();
-      setRunning(!running);
-    }} else {{
-      document.getElementById('hint').textContent =
-        'Use the Streamlit mic widget below ↓';
-    }}
+    var btn = findAudioBtn(pd);
+    if (btn) {{ btn.click(); return; }}
+    // Button not rendered yet — wait for it via MutationObserver
+    var waited = 0, interval = 80;
+    var timer = setInterval(function() {{
+      btn = findAudioBtn(pd);
+      waited += interval;
+      if (btn) {{ btn.click(); clearInterval(timer); }}
+      else if (waited >= (maxWaitMs || 3000)) {{
+        clearInterval(timer);
+        document.getElementById('hint').textContent =
+          'Use the Streamlit mic widget below ↓';
+      }}
+    }}, interval);
+  }}
+
+  function triggerWhisper() {{
+    clickAudioBtnWhenReady(3000);
+    setRunning(!running);
   }}
 
   window.triggerWhisper = triggerWhisper;
@@ -1383,20 +1570,42 @@ def whisper_audio_input(stt, q_number: int) -> str:
     if audio_val is None:
         return st.session_state.get("transcribed_text", "")
 
-    audio_id = audio_val.size
-    if st.session_state.get("last_audio_id") == audio_id:
+    # ── Dedup: use SHA-256 of raw bytes (scoped per question) ────────────────
+    # audio_val.size alone is unsafe: two recordings can share the same byte
+    # count (false-positive skip).  A content hash guarantees uniqueness while
+    # still being fast enough for recordings up to several MB.
+    import hashlib as _hashlib
+    _raw_peek   = audio_val.read()
+    audio_id    = _hashlib.sha256(_raw_peek).hexdigest()
+    dedup_key   = f"_whisper_audio_id_{q_number}"
+    last_audio_id = st.session_state.get(dedup_key)
+
+    if last_audio_id == audio_id:
+        # Same recording already transcribed for this question — return cached text.
+        # BUG FIX 2: re-assert last_audio_bytes from the Whisper-specific backup
+        # key so the nervousness pipeline can still read it after the submit rerun
+        # clears last_audio_bytes (app.py sets it to None after submit_answer).
+        backup = st.session_state.get(f"_whisper_last_audio_bytes_{q_number}")
+        if backup and not st.session_state.get("last_audio_bytes"):
+            st.session_state["last_audio_bytes"]  = backup
+            st.session_state["last_audio_source"] = "whisper_mic"
         return st.session_state.get("transcribed_text", "")
 
-    raw = audio_val.read()
+    raw = _raw_peek   # already read above for hashing — do not call .read() again
 
-    # Store bytes for voice nervousness pipeline in submit_answer()
-    st.session_state["last_audio_bytes"]  = raw
-    st.session_state["last_audio_source"] = "whisper_mic"
+    # ── BUG FIX 2: dual-store audio bytes for nervousness pipeline ───────────
+    # last_audio_bytes  — read by submit_answer() on the immediate rerun
+    # _whisper_last_audio_bytes_{q_number}  — survives the submit rerun
+    #   (mirrors the _bstt_last_audio_bytes backup used by the Browser STT path)
+    st.session_state["last_audio_bytes"]                         = raw
+    st.session_state["last_audio_source"]                        = "whisper_mic"
+    st.session_state[f"_whisper_last_audio_bytes_{q_number}"]   = raw  # backup
 
     with st.spinner("🔄 Transcribing with Whisper…"):
         text = stt.transcribe(raw) if stt_ok else "[Whisper not available]"
 
-    st.session_state["last_audio_id"]    = audio_id
+    st.session_state[dedup_key]          = audio_id   # scoped dedup key (new)
+    st.session_state["last_audio_id"]    = audio_id   # legacy global key (kept for compat)
     st.session_state["transcribed_text"] = text
 
     if text.startswith("["):
