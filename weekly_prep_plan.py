@@ -635,38 +635,40 @@ def _render_timeline(done_set: set, idate, role: str) -> None:
             "border-radius:8px;background:rgba(0,229,255,.06);border:1px solid rgba(0,229,255,.14);"
             "color:rgba(180,210,230,.55);")
 
-    st.markdown(f"""
-<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:.7rem;
-  padding:.9rem 1.4rem;background:rgba(0,229,255,.03);border:1px solid rgba(0,229,255,.12);
-  border-radius:14px;margin-bottom:1rem;">
-  <div>
-    <div style="font-family:Orbitron,monospace;font-size:1.1rem;font-weight:900;
-      color:#00e5ff;letter-spacing:.06em;text-shadow:0 0 20px rgba(0,229,255,.4);">
-      ⬡ <span style="color:rgba(255,255,255,.85);">AURA</span> WEEKLY PREP PLAN
-    </div>
-    <div style="font-family:JetBrains Mono,monospace;font-size:.52rem;
-      color:rgba(180,210,230,.35);letter-spacing:.1em;text-transform:uppercase;margin-top:.15rem;">
-      Adaptive RL · Live Coaching · Voice · DISC/OCEAN · Full Pipeline
-    </div>
-  </div>
-  <div style="display:flex;gap:.45rem;flex-wrap:wrap;">
-    <span style="{chip}">Role &nbsp;<b style="color:#00e5ff;">{role}</b></span>
-    <span style="{chip}">Interview in &nbsp;<b style="color:#00e5ff;">{days_left}</b>&nbsp; days</span>
-    <span style="{chip}">Complete &nbsp;<b style="color:#00e5ff;">{done_count}/7</b></span>
-  </div>
-</div>
-
-<div style="margin-bottom:1.2rem;">
-  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.35rem;">
-    <span style="font-family:JetBrains Mono,monospace;font-size:.57rem;
-      color:rgba(180,210,230,.35);letter-spacing:.08em;text-transform:uppercase;">Week Progress</span>
-    <span style="font-family:Orbitron,monospace;font-size:.65rem;font-weight:700;color:#00e5ff;">{pct}%</span>
-  </div>
-  <div style="height:3px;background:rgba(255,255,255,.05);border-radius:4px;overflow:hidden;">
-    <div style="height:100%;width:{pct}%;background:linear-gradient(90deg,#00e5ff,#7f5af0);border-radius:4px;"></div>
-  </div>
-</div>
-""", unsafe_allow_html=True)
+    # NOTE: All HTML is built as a single concatenated string (no leading 4-space
+    # indentation) to avoid Markdown's code-block rule turning it into raw text.
+    st.markdown(
+        '<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:.7rem;'
+        'padding:.9rem 1.4rem;background:rgba(0,229,255,.03);border:1px solid rgba(0,229,255,.12);'
+        'border-radius:14px;margin-bottom:1rem;">'
+        '<div>'
+        '<div style="font-family:Orbitron,monospace;font-size:1.1rem;font-weight:900;'
+        'color:#00e5ff;letter-spacing:.06em;text-shadow:0 0 20px rgba(0,229,255,.4);">'
+        '⬡ <span style="color:rgba(255,255,255,.85);">AURA</span> WEEKLY PREP PLAN'
+        '</div>'
+        '<div style="font-family:JetBrains Mono,monospace;font-size:.52rem;'
+        'color:rgba(180,210,230,.35);letter-spacing:.1em;text-transform:uppercase;margin-top:.15rem;">'
+        'Adaptive RL · Live Coaching · Voice · DISC/OCEAN · Full Pipeline'
+        '</div>'
+        '</div>'
+        '<div style="display:flex;gap:.45rem;flex-wrap:wrap;">'
+        f'<span style="{chip}">Role &nbsp;<b style="color:#00e5ff;">{role}</b></span>'
+        f'<span style="{chip}">Interview in &nbsp;<b style="color:#00e5ff;">{days_left}</b>&nbsp; days</span>'
+        f'<span style="{chip}">Complete &nbsp;<b style="color:#00e5ff;">{done_count}/7</b></span>'
+        '</div>'
+        '</div>'
+        '<div style="margin-bottom:1.2rem;">'
+        '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.35rem;">'
+        '<span style="font-family:JetBrains Mono,monospace;font-size:.57rem;'
+        'color:rgba(180,210,230,.35);letter-spacing:.08em;text-transform:uppercase;">Week Progress</span>'
+        f'<span style="font-family:Orbitron,monospace;font-size:.65rem;font-weight:700;color:#00e5ff;">{pct}%</span>'
+        '</div>'
+        '<div style="height:3px;background:rgba(255,255,255,.05);border-radius:4px;overflow:hidden;">'
+        f'<div style="height:100%;width:{pct}%;background:linear-gradient(90deg,#00e5ff,#7f5af0);border-radius:4px;"></div>'
+        '</div>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
 
 
 
@@ -1021,18 +1023,16 @@ def _render_practice_window(day_num: int, engine=None) -> None:
 """, unsafe_allow_html=True)
 
     # ── Animated background (separate call to avoid HTML comment breaking renderer) ──
-    st.markdown("""
-<div class="wp5-bg">
-  <div class="wp5-grid"></div>
-  <div class="wp5-particles">
-    <div class="wp5-p" style="left:10%;width:3px;height:3px;animation-duration:12s;animation-delay:0s;"></div>
-    <div class="wp5-p" style="left:30%;width:2px;height:2px;animation-duration:18s;animation-delay:3s;"></div>
-    <div class="wp5-p" style="left:55%;width:4px;height:4px;animation-duration:9s;animation-delay:1s;"></div>
-    <div class="wp5-p" style="left:75%;width:2px;height:2px;animation-duration:15s;animation-delay:5s;"></div>
-    <div class="wp5-p" style="left:90%;width:3px;height:3px;animation-duration:11s;animation-delay:2s;"></div>
-  </div>
-</div>
-""", unsafe_allow_html=True)
+    st.markdown(
+        '<div class="wp5-bg"><div class="wp5-grid"></div><div class="wp5-particles">'
+        '<div class="wp5-p" style="left:10%;width:3px;height:3px;animation-duration:12s;animation-delay:0s;"></div>'
+        '<div class="wp5-p" style="left:30%;width:2px;height:2px;animation-duration:18s;animation-delay:3s;"></div>'
+        '<div class="wp5-p" style="left:55%;width:4px;height:4px;animation-duration:9s;animation-delay:1s;"></div>'
+        '<div class="wp5-p" style="left:75%;width:2px;height:2px;animation-duration:15s;animation-delay:5s;"></div>'
+        '<div class="wp5-p" style="left:90%;width:3px;height:3px;animation-duration:11s;animation-delay:2s;"></div>'
+        '</div></div>',
+        unsafe_allow_html=True,
+    )
 
     # ── State vars ─────────────────────────────────────────────────────────────
     answers_so_far = st.session_state.get("wp_practice_answers", [])
@@ -1058,25 +1058,26 @@ def _render_practice_window(day_num: int, engine=None) -> None:
     # ── Session in progress ────────────────────────────────────────────────────
     if q_num <= total_q:
         # ── HUD top bar HTML ───────────────────────────────────────────────────
-        st.markdown(f"""
-<div class="wp5-hud">
-  <div class="wp5-hud-left">
-    <span class="wp5-q-counter">Q{q_num}/{total_q} · {cfg.signal}</span>
-    <span class="wp5-q-type">{cfg.q_type}</span>
-    <span class="wp5-diff-chip" style="color:{diff_color};background:{diff_color}11;
-      border:1px solid {diff_color}44;">{cfg.difficulty.upper()}</span>
-    <span class="wp5-mood-chip">♪ Neutral</span>
-    <span class="wp5-mood-chip">✦ Neutral</span>
-  </div>
-  <div class="wp5-progress-wrap">
-    <div class="wp5-progress-track">
-      <div class="wp5-progress-fill" style="width:{pct_done}%;"></div>
-    </div>
-    <span style="font-family:'JetBrains Mono',monospace;font-size:.55rem;
-      color:rgba(0,229,255,.35);">{pct_done}%</span>
-  </div>
-</div>
-""", unsafe_allow_html=True)
+        st.markdown(
+            '<div class="wp5-hud">'
+            '<div class="wp5-hud-left">'
+            f'<span class="wp5-q-counter">Q{q_num}/{total_q} · {cfg.signal}</span>'
+            f'<span class="wp5-q-type">{cfg.q_type}</span>'
+            f'<span class="wp5-diff-chip" style="color:{diff_color};background:{diff_color}11;'
+            f'border:1px solid {diff_color}44;">{cfg.difficulty.upper()}</span>'
+            '<span class="wp5-mood-chip">♪ Neutral</span>'
+            '<span class="wp5-mood-chip">✦ Neutral</span>'
+            '</div>'
+            '<div class="wp5-progress-wrap">'
+            '<div class="wp5-progress-track">'
+            f'<div class="wp5-progress-fill" style="width:{pct_done}%;"></div>'
+            '</div>'
+            f'<span style="font-family:\'JetBrains Mono\',monospace;font-size:.55rem;'
+            f'color:rgba(0,229,255,.35);">{pct_done}%</span>'
+            '</div>'
+            '</div>',
+            unsafe_allow_html=True,
+        )
 
         # Show a tip
         tip = random.choice(cfg.tips)
@@ -1171,20 +1172,25 @@ def _render_practice_window(day_num: int, engine=None) -> None:
         src_info = "📚 HR Dataset" if q_source == "hr_dataset" else ("🤖 AI Generated" if q_source else "")
         rl_info  = " · ⚡ RL Adapted" if cfg.use_rl else ""
 
-        st.markdown(f"""
-<div class="{card_cls}">
-  <div style="font-family:'JetBrains Mono',monospace;font-size:.58rem;
-    color:rgba(0,229,255,.38);letter-spacing:.12em;text-transform:uppercase;
-    margin-bottom:.7rem;display:flex;align-items:center;gap:.8rem;">
-    <span>{fu_label}</span>
-    <span style="color:rgba(255,255,255,.15);">·</span>
-    <span>{q_type.upper()}</span>
-    {f'<span style="color:rgba(255,255,255,.15);">·</span><span>{src_info}{rl_info}</span>' if src_info else ''}
-  </div>
-  <div class="wp5-q-text">{q_text}</div>
-  {star_tags}
-</div>
-""", unsafe_allow_html=True)
+        src_suffix = (
+            f'<span style="color:rgba(255,255,255,.15);">·</span><span>{src_info}{rl_info}</span>'
+            if src_info else ''
+        )
+        st.markdown(
+            f'<div class="{card_cls}">'
+            f'<div style="font-family:\'JetBrains Mono\',monospace;font-size:.58rem;'
+            f'color:rgba(0,229,255,.38);letter-spacing:.12em;text-transform:uppercase;'
+            f'margin-bottom:.7rem;display:flex;align-items:center;gap:.8rem;">'
+            f'<span>{fu_label}</span>'
+            f'<span style="color:rgba(255,255,255,.15);">·</span>'
+            f'<span>{q_type.upper()}</span>'
+            f'{src_suffix}'
+            f'</div>'
+            f'<div class="wp5-q-text">{q_text}</div>'
+            f'{star_tags}'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
 
         # ── Voice input panel ──────────────────────────────────────────────────
         st.markdown('<div class="wp5-voice-panel">', unsafe_allow_html=True)
@@ -1351,30 +1357,31 @@ def _render_practice_window(day_num: int, engine=None) -> None:
                     f'</details>'
                 )
 
-            st.markdown(f"""
-<div class="wp5-fb">
-  <div class="wp5-fb-score-row">
-    <div>
-      <div class="wp5-fb-score" style="color:{sc};">{score:.1f}</div>
-      <div style="font-family:'JetBrains Mono',monospace;font-size:.75rem;
-        color:rgba(255,255,255,.2);margin-top:.15rem;">/ 5.0</div>
-    </div>
-    <div>
-      <div style="font-family:'Syne',sans-serif;font-size:1.1rem;
-        font-weight:700;color:{sc};">{sl}</div>
-      <div class="wp5-fb-label">Score · {q_type}</div>
-    </div>
-  </div>
-
-  <div style="height:1px;background:rgba(255,255,255,.06);margin:.8rem 0;"></div>
-
-  {f'<div class="wp5-fb-label" style="margin-bottom:.5rem;">STAR BREAKDOWN</div>{star_html}' if star_html else ''}
-  {f'<div class="wp5-fb-label" style="margin-bottom:.5rem;">KEYWORD COVERAGE</div>{kw_html}' if kw_html else ''}
-  {fb_html}
-  {ps_wrap}
-  {ideal_html}
-</div>
-""", unsafe_allow_html=True)
+            star_section = f'<div class="wp5-fb-label" style="margin-bottom:.5rem;">STAR BREAKDOWN</div>{star_html}' if star_html else ''
+            kw_section   = f'<div class="wp5-fb-label" style="margin-bottom:.5rem;">KEYWORD COVERAGE</div>{kw_html}' if kw_html else ''
+            st.markdown(
+                '<div class="wp5-fb">'
+                '<div class="wp5-fb-score-row">'
+                '<div>'
+                f'<div class="wp5-fb-score" style="color:{sc};">{score:.1f}</div>'
+                f'<div style="font-family:\'JetBrains Mono\',monospace;font-size:.75rem;'
+                f'color:rgba(255,255,255,.2);margin-top:.15rem;">/ 5.0</div>'
+                '</div>'
+                '<div>'
+                f'<div style="font-family:\'Syne\',sans-serif;font-size:1.1rem;'
+                f'font-weight:700;color:{sc};">{sl}</div>'
+                f'<div class="wp5-fb-label">Score · {q_type}</div>'
+                '</div>'
+                '</div>'
+                '<div style="height:1px;background:rgba(255,255,255,.06);margin:.8rem 0;"></div>'
+                f'{star_section}'
+                f'{kw_section}'
+                f'{fb_html}'
+                f'{ps_wrap}'
+                f'{ideal_html}'
+                '</div>',
+                unsafe_allow_html=True,
+            )
 
             # Coach card
             if coaching_tip and COACH_AVAILABLE:
@@ -1450,18 +1457,20 @@ def _render_practice_window(day_num: int, engine=None) -> None:
         }
         st.session_state["wp_day_metrics"] = day_metrics
 
-        st.markdown(f"""
-<div class="wp5-summary">
-  <div style="font-family:'Orbitron',monospace;font-size:.65rem;color:rgba(0,229,255,.4);
-    letter-spacing:.12em;text-transform:uppercase;margin-bottom:.7rem;">SESSION COMPLETE · DAY {day_num}</div>
-  <div style="font-family:'Orbitron',monospace;font-size:3rem;font-weight:900;
-    color:{ac};line-height:1;text-shadow:0 0 30px {ac}66;">{avg:.1f}</div>
-  <div style="font-family:'JetBrains Mono',monospace;font-size:.7rem;
-    color:rgba(255,255,255,.25);margin:.3rem 0 .6rem;">/ 5.0 average</div>
-  <div style="font-family:'Syne',sans-serif;font-size:1rem;font-weight:700;color:{ac};">{al}</div>
-  <div style="font-family:'JetBrains Mono',monospace;font-size:.62rem;
-    color:rgba(180,210,230,.3);margin-top:.4rem;">{len(scores)}/{total_q} questions scored</div>
-</div>""", unsafe_allow_html=True)
+        st.markdown(
+            '<div class="wp5-summary">'
+            f'<div style="font-family:\'Orbitron\',monospace;font-size:.65rem;color:rgba(0,229,255,.4);'
+            f'letter-spacing:.12em;text-transform:uppercase;margin-bottom:.7rem;">SESSION COMPLETE · DAY {day_num}</div>'
+            f'<div style="font-family:\'Orbitron\',monospace;font-size:3rem;font-weight:900;'
+            f'color:{ac};line-height:1;text-shadow:0 0 30px {ac}66;">{avg:.1f}</div>'
+            f'<div style="font-family:\'JetBrains Mono\',monospace;font-size:.7rem;'
+            f'color:rgba(255,255,255,.25);margin:.3rem 0 .6rem;">/ 5.0 average</div>'
+            f'<div style="font-family:\'Syne\',sans-serif;font-size:1rem;font-weight:700;color:{ac};">{al}</div>'
+            f'<div style="font-family:\'JetBrains Mono\',monospace;font-size:.62rem;'
+            f'color:rgba(180,210,230,.3);margin-top:.4rem;">{len(scores)}/{total_q} questions scored</div>'
+            '</div>',
+            unsafe_allow_html=True,
+        )
 
         # Per-question summary
         st.markdown("### 📋 Answer Review")
