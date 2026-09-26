@@ -1,0 +1,376 @@
+"""
+notes_pdf.py  —  Generate a full interview study-notes PDF from parsed notes data.
+Uses reportlab Platypus for multi-page layout with proper styles, tables, and colors.
+
+Fixes applied (v2):
+  - Removed invalid ROUNDEDCORNERS TableStyle command (not supported by reportlab)
+  - Added empty subsection / empty items guards throughout
+  - Fixed build_item_paragraph to strip all markdown variants (**, *, _, `)
+  - Added confidence score rendering per section (dots + label)
+  - Improved KeepTogether threshold (per-subsection rather than per-section)
+"""
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.units import mm
+from reportlab.lib import colors
+from reportlab.lib.styles import ParagraphStyle
+from reportlab.lib.enums import TA_LEFT, TA_CENTER
+from reportlab.platypus import (
+    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
+    HRFlowable, KeepTogether, PageBreak
+)
+from reportlab.lib.colors import HexColor
+from io import BytesIO
+import datetime
+import re
+
+# ── Palette ───────────────────────────────────────────────────────────────────
+BG_PAGE  = HexColor("#FFFFFF")
+C_PURPLE = HexColor("#6d28d9")
+C_CYAN   = HexColor("#0891b2")
+C_GREEN  = HexColor("#059669")
+C_RED    = HexColor("#dc2626")
+C_AMBER  = HexColor("#d97706")
+C_SLATE  = HexColor("#374151")
+C_LIGHT  = HexColor("#f5f3ff")
+C_GRAY   = HexColor("#6b7280")
+C_BLACK  = HexColor("#111827")
+C_WHITE  = colors.white
+
+# Tag colours per subsection type
+TAG_COLORS = {
+    "key concepts":     (HexColor("#0891b2"), HexColor("#e0f2fe"), "note"),
+    "common interview": (HexColor("#7c3aed"), HexColor("#ede9fe"), "Q"),
+    "strong answer":    (HexColor("#059669"), HexColor("#d1fae5"), "do this"),
+    "common mistake":   (HexColor("#dc2626"), HexColor("#fee2e2"), "avoid"),
+    "quick-recall":     (HexColor("#d97706"), HexColor("#fef3c7"), "tip"),
+}
+
+# Confidence dot colours — mirrors the app's 1-5 scale
+CONF_COLORS = {
+    0: ("#9ca3af", ""),           # unrated
+    1: ("#ff3366", "Shaky"),
+    2: ("#fbbf24", "Okay"),
+    3: ("#fbbf24", "Okay"),
+    4: ("#00d4ff", "Strong"),
+    5: ("#00ff88", "Mastered"),
+}
+
+
+def get_tag_info(heading):
+    hl = heading.lower()
+    for k, (fg, bg, label) in TAG_COLORS.items():
+        if k in hl:
+            return fg, bg, label
+    return C_GRAY, HexColor("#f3f4f6"), "note"
+
+
+def strip_markdown(text: str) -> str:
+    """Remove **bold**, *italic*, _underline_, `code`, and extra whitespace."""
+    text = re.sub(r'\*\*([^*]+)\*\*', r'\1', text)   # **bold**
+    text = re.sub(r'\*([^*]+)\*',     r'\1', text)   # *italic*
+    text = re.sub(r'_([^_]+)_',       r'\1', text)   # _underline_
+    text = re.sub(r'`([^`]+)`',       r'\1', text)   # `code`
+    text = text.replace('**', '').replace('*', '')    # stray asterisks
+    return text.strip()
+
+
+def xml_safe(text: str) -> str:
+    """Escape XML special characters for reportlab Paragraph tags."""
+    return (text.replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;"))
+
+
+# ── Style sheet ───────────────────────────────────────────────────────────────
+def make_styles():
+    return {
+        "eyebrow": ParagraphStyle(
+            "eyebrow", fontName="Helvetica", fontSize=8, textColor=C_PURPLE,
+            spaceAfter=4, leading=10, letterSpacing=3,
+        ),
+        "title": ParagraphStyle(
+            "title", fontName="Helvetica-Bold", fontSize=26, textColor=C_BLACK,
+            spaceAfter=6, leading=30,
+        ),
+        "subtitle": ParagraphStyle(
+            "subtitle", fontName="Helvetica", fontSize=11, textColor=C_GRAY,
+            spaceAfter=2, leading=15,
+        ),
+        "toc_heading": ParagraphStyle(
+            "toc_heading", fontName="Helvetica-Bold", fontSize=9, textColor=C_PURPLE,
+            spaceBefore=0, spaceAfter=6, letterSpacing=2,
+        ),
+        "toc_item": ParagraphStyle(
+            "toc_item", fontName="Helvetica", fontSize=10, textColor=C_SLATE,
+            spaceAfter=3, leading=14, leftIndent=10,
+        ),
+        "section_title": ParagraphStyle(
+            "section_title", fontName="Helvetica-Bold", fontSize=13, textColor=C_WHITE,
+            spaceAfter=0, leading=17,
+        ),
+        "sub_heading": ParagraphStyle(
+            "sub_heading", fontName="Helvetica-Bold", fontSize=9, textColor=C_GRAY,
+            spaceBefore=8, spaceAfter=4, leading=12, letterSpacing=1.5,
+        ),
+        "item_full": ParagraphStyle(
+            "item_full", fontName="Helvetica", fontSize=10, textColor=C_SLATE,
+            leading=15,
+        ),
+        "conf_label": ParagraphStyle(
+            "conf_label", fontName="Helvetica", fontSize=8, textColor=C_GRAY,
+            leading=10, alignment=TA_CENTER,
+        ),
+        "footer": ParagraphStyle(
+            "footer", fontName="Helvetica", fontSize=8, textColor=C_GRAY,
+            alignment=TA_CENTER, leading=10,
+        ),
+    }
+
+
+def build_item_paragraph(item_text: str, styles) -> Paragraph:
+    """
+    Renders one bullet item. Bolds the part before the first colon if within 45 chars.
+    Strips all markdown variants before rendering.
+    """
+    clean = strip_markdown(item_text)
+    colon_idx = clean.find(":")
+    if 0 < colon_idx < 45:
+        key = xml_safe(clean[:colon_idx].strip())
+        val = xml_safe(clean[colon_idx + 1:].strip())
+        return Paragraph(f"<b>{key}:</b> {val}", styles["item_full"])
+    else:
+        return Paragraph(xml_safe(clean), styles["item_full"])
+
+
+def build_tag_cell(label: str, fg, bg) -> Table:
+    """A small coloured tag pill for the left column of each item row."""
+    style = ParagraphStyle(
+        "tag", fontName="Helvetica-Bold", fontSize=7, textColor=fg,
+        alignment=TA_CENTER, leading=9,
+    )
+    p = Paragraph(label.upper(), style)
+    t = Table([[p]], colWidths=[14 * mm])
+    t.setStyle(TableStyle([
+        ("BACKGROUND",   (0, 0), (-1, -1), bg),
+        ("TOPPADDING",   (0, 0), (-1, -1), 2),
+        ("BOTTOMPADDING",(0, 0), (-1, -1), 2),
+        ("LEFTPADDING",  (0, 0), (-1, -1), 3),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 3),
+        ("BOX",          (0, 0), (-1, -1), 0.5, fg),
+    ]))
+    return t
+
+
+def build_confidence_cell(conf: int, styles) -> Table:
+    """
+    Renders 5 filled/empty dots + a label for confidence level 0-5.
+    Returns a Table for inline use next to the section title.
+    """
+    hex_color, label = CONF_COLORS.get(conf, CONF_COLORS[0])
+    dot_color = HexColor(hex_color)
+    dots = ""
+    for i in range(1, 6):
+        filled = i <= conf
+        dot_hex = hex_color if filled else "#d1d5db"
+        dots += f'<font color="{dot_hex}">●</font> '
+    dot_p = Paragraph(dots.strip(), ParagraphStyle(
+        "dots", fontName="Helvetica", fontSize=10, textColor=C_GRAY,
+        leading=13, alignment=TA_CENTER,
+    ))
+    label_p = Paragraph(label, styles["conf_label"]) if label else Paragraph("", styles["conf_label"])
+    t = Table([[dot_p], [label_p]], colWidths=[28 * mm])
+    t.setStyle(TableStyle([
+        ("TOPPADDING",   (0, 0), (-1, -1), 0),
+        ("BOTTOMPADDING",(0, 0), (-1, -1), 0),
+        ("LEFTPADDING",  (0, 0), (-1, -1), 0),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+        ("ALIGN",        (0, 0), (-1, -1), "CENTER"),
+    ]))
+    return t
+
+
+def make_section_header(number: int, title: str, conf: int, styles, page_width, margins) -> Table:
+    """Purple banner with section number + title + confidence dots."""
+    inner_w = page_width - margins[0] - margins[1]
+    conf_w  = 30 * mm
+    num_w   = 10 * mm
+    title_w = inner_w - num_w - conf_w
+
+    num_p = Paragraph(str(number), ParagraphStyle(
+        "sn", fontName="Helvetica-Bold", fontSize=11, textColor=HexColor("#ddd6fe"),
+        alignment=TA_CENTER, leading=14,
+    ))
+    title_p = Paragraph(xml_safe(strip_markdown(title)), styles["section_title"])
+    conf_cell = build_confidence_cell(conf, styles)
+
+    t = Table([[num_p, title_p, conf_cell]], colWidths=[num_w, title_w, conf_w])
+    t.setStyle(TableStyle([
+        ("BACKGROUND",   (0, 0), (-1, -1), C_PURPLE),
+        ("VALIGN",       (0, 0), (-1, -1), "MIDDLE"),
+        ("TOPPADDING",   (0, 0), (-1, -1), 8),
+        ("BOTTOMPADDING",(0, 0), (-1, -1), 8),
+        ("LEFTPADDING",  (0, 0), (-1, -1), 10),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 10),
+        # Confidence column gets a lighter left border to separate it
+        ("LINEAFTER",    (1, 0), (1, 0), 0.5, HexColor("#a78bfa")),
+    ]))
+    return t
+
+
+def make_subsection(sub: dict, styles, page_width, margins) -> list:
+    """Returns a list of flowables for one ### subsection. Skips if items is empty."""
+    items = sub.get("items", [])
+    if not items:
+        return []  # Guard: skip empty subsections entirely
+
+    heading = sub.get("heading", "")
+    fg, bg, label = get_tag_info(heading)
+    inner_w = page_width - margins[0] - margins[1]
+    tag_w   = 15 * mm
+    item_w  = inner_w - tag_w - 4 * mm
+
+    flowables = []
+    flowables.append(Paragraph(strip_markdown(heading).upper(), styles["sub_heading"]))
+
+    for item in items:
+        if not item or not item.strip():
+            continue  # Skip blank items
+        tag_cell  = build_tag_cell(label, fg, bg)
+        text_cell = build_item_paragraph(item, styles)
+        row = Table([[tag_cell, text_cell]], colWidths=[tag_w, item_w])
+        row.setStyle(TableStyle([
+            ("VALIGN",       (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING",  (0, 0), (-1, -1), 0),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+            ("TOPPADDING",   (0, 0), (-1, -1), 3),
+            ("BOTTOMPADDING",(0, 0), (-1, -1), 3),
+            ("LINEBELOW",    (0, 0), (-1, -1), 0.3, HexColor("#e5e7eb")),
+        ]))
+        flowables.append(row)
+
+    return flowables
+
+
+def header_footer(canvas, doc, role, pack_label, depth, generated_at, styles):
+    """Draw header rule + footer on every page."""
+    canvas.saveState()
+    w, h = A4
+    canvas.setStrokeColor(C_PURPLE)
+    canvas.setLineWidth(2)
+    canvas.line(doc.leftMargin, h - doc.topMargin + 4 * mm,
+                w - doc.rightMargin, h - doc.topMargin + 4 * mm)
+    canvas.setFont("Helvetica", 8)
+    canvas.setFillColor(C_GRAY)
+    canvas.drawString(doc.leftMargin, doc.bottomMargin - 5 * mm,
+                      f"{role} — Interview Study Notes  ·  {pack_label}  ·  {depth}")
+    canvas.drawRightString(w - doc.rightMargin, doc.bottomMargin - 5 * mm,
+                           f"Page {doc.page}  ·  Generated {generated_at}")
+    canvas.restoreState()
+
+
+def generate_notes_pdf(notes: list, role: str, pack_label: str = "Standard",
+                       depth: str = "Standard", confidence: dict = None,
+                       output_path=None):
+    """
+    Generate a PDF from parsed study notes.
+
+    Args:
+        notes:       list of {title, subsections: [{heading, items:[str]}]}
+        role:        job role string (e.g. "Software Engineer")
+        pack_label:  company pack label (e.g. "FAANG / Big Tech")
+        depth:       depth label (e.g. "Standard")
+        confidence:  optional dict mapping topic title → int 0-5 from localStorage
+        output_path: if None, returns PDF bytes; otherwise writes to file path
+
+    Returns:
+        bytes if output_path is None, else None
+    """
+    confidence = confidence or {}
+    buf  = BytesIO() if output_path is None else None
+    dest = buf if buf else output_path
+
+    PAGE_W, PAGE_H = A4
+    MARGIN_L = 20 * mm
+    MARGIN_R = 20 * mm
+    MARGIN_T = 18 * mm
+    MARGIN_B = 18 * mm
+    MARGINS  = (MARGIN_L, MARGIN_R)
+
+    generated_at = datetime.datetime.now().strftime("%d %b %Y, %H:%M")
+    styles = make_styles()
+
+    doc = SimpleDocTemplate(
+        dest, pagesize=A4,
+        leftMargin=MARGIN_L, rightMargin=MARGIN_R,
+        topMargin=MARGIN_T, bottomMargin=MARGIN_B,
+        title=f"{role} — Interview Study Notes",
+        author="AURA AI Interview Coach",
+        subject="Interview preparation study notes",
+    )
+
+    story = []
+
+    # ── Cover block ───────────────────────────────────────────────────────────
+    story.append(Spacer(1, 10 * mm))
+    story.append(Paragraph("AI STUDY NOTES", styles["eyebrow"]))
+    story.append(Paragraph(f"{role} — Interview Study Notes", styles["title"]))
+    story.append(Paragraph(
+        f"{pack_label} &nbsp;·&nbsp; {depth} &nbsp;·&nbsp; "
+        f"{len(notes)} topics &nbsp;·&nbsp; {generated_at}",
+        styles["subtitle"]
+    ))
+    story.append(HRFlowable(width="100%", thickness=1, color=C_PURPLE, spaceAfter=10 * mm))
+
+    # ── Table of contents ─────────────────────────────────────────────────────
+    story.append(Paragraph("CONTENTS", styles["toc_heading"]))
+    for i, section in enumerate(notes, 1):
+        conf = confidence.get(section.get("title", ""), 0)
+        conf_hex, conf_label = CONF_COLORS.get(conf, CONF_COLORS[0])
+        suffix = f"  <font color='{conf_hex}'>●</font> {conf_label}" if conf_label else ""
+        story.append(Paragraph(
+            f"{i}.&nbsp;&nbsp;{xml_safe(section.get('title', ''))}{suffix}",
+            styles["toc_item"]
+        ))
+    story.append(Spacer(1, 6 * mm))
+    story.append(HRFlowable(width="100%", thickness=0.5, color=HexColor("#e5e7eb"), spaceAfter=8 * mm))
+
+    # ── Sections ──────────────────────────────────────────────────────────────
+    for i, section in enumerate(notes, 1):
+        title = section.get("title", f"Section {i}")
+        subsections = section.get("subsections", [])
+        conf = confidence.get(title, 0)
+
+        # Filter out subsections with no items before any processing
+        valid_subs = [s for s in subsections if s.get("items")]
+        if not valid_subs:
+            continue  # Skip entirely empty sections
+
+        section_header = make_section_header(i, title, conf, styles, PAGE_W, MARGINS)
+        story.append(section_header)
+        story.append(Spacer(1, 4 * mm))
+
+        for sub in valid_subs:
+            sub_flowables = make_subsection(sub, styles, PAGE_W, MARGINS)
+            if not sub_flowables:
+                continue
+            # Wrap each subsection in KeepTogether so it doesn't split mid-page
+            sub_item_count = len(sub.get("items", []))
+            if sub_item_count <= 8:
+                story.append(KeepTogether(sub_flowables))
+            else:
+                story.extend(sub_flowables)
+            story.append(Spacer(1, 3 * mm))
+
+        story.append(Spacer(1, 6 * mm))
+        if i < len(notes):
+            story.append(HRFlowable(
+                width="100%", thickness=0.4, color=HexColor("#e5e7eb"), spaceAfter=4 * mm
+            ))
+
+    # ── Build ─────────────────────────────────────────────────────────────────
+    hf = lambda c, d: header_footer(c, d, role, pack_label, depth, generated_at, styles)
+    doc.build(story, onFirstPage=hf, onLaterPages=hf)
+
+    if buf:
+        return buf.getvalue()
+    return None
