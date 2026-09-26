@@ -1,0 +1,163 @@
+{
+  "model_type": "CNN1D_BiLSTM",
+  "train_accuracy": 99.95,
+  "val_accuracy": 74.11,
+  "test_accuracy": 73.67,
+  "test_f1_weighted": 0.7364,
+  "cv_mean_accuracy": 72.92,
+  "cv_std_accuracy": 1.19,
+  "nervousness_binary_accuracy": 86.22,
+  "nervousness_binary_f1": 0.891,
+  "n_classes": 7,
+  "class_names": [
+    "Neutral",
+    "Happy",
+    "Sad",
+    "Angry",
+    "Fear",
+    "Disgust",
+    "Pleasant"
+  ],
+  "n_train": 4200,
+  "n_val": 900,
+  "n_test": 900,
+  "n_total": 6000,
+  "seq_len": 5,
+  "feature_size": 108,
+  "per_class_accuracy": {
+    "Neutral": 66.4,
+    "Happy": 69.9,
+    "Sad": 76.3,
+    "Angry": 79.1,
+    "Fear": 68.0,
+    "Disgust": 70.4,
+    "Pleasant": 98.5
+  },
+  "confusion_matrix": [
+    [
+      85,
+      10,
+      12,
+      2,
+      8,
+      11,
+      0
+    ],
+    [
+      8,
+      100,
+      1,
+      15,
+      12,
+      7,
+      0
+    ],
+    [
+      8,
+      1,
+      103,
+      0,
+      15,
+      8,
+      0
+    ],
+    [
+      2,
+      10,
+      0,
+      110,
+      6,
+      11,
+      0
+    ],
+    [
+      5,
+      13,
+      15,
+      7,
+      100,
+      7,
+      0
+    ],
+    [
+      9,
+      8,
+      12,
+      9,
+      4,
+      100,
+      0
+    ],
+    [
+      0,
+      1,
+      0,
+      0,
+      0,
+      0,
+      65
+    ]
+  ],
+  "classification_report": {
+    "Neutral": {
+      "precision": 0.7264957264957265,
+      "recall": 0.6640625,
+      "f1-score": 0.6938775510204082,
+      "support": 128.0
+    },
+    "Happy": {
+      "precision": 0.6993006993006993,
+      "recall": 0.6993006993006993,
+      "f1-score": 0.6993006993006993,
+      "support": 143.0
+    },
+    "Sad": {
+      "precision": 0.7202797202797203,
+      "recall": 0.762962962962963,
+      "f1-score": 0.7410071942446043,
+      "support": 135.0
+    },
+    "Angry": {
+      "precision": 0.7692307692307693,
+      "recall": 0.7913669064748201,
+      "f1-score": 0.7801418439716312,
+      "support": 139.0
+    },
+    "Fear": {
+      "precision": 0.6896551724137931,
+      "recall": 0.6802721088435374,
+      "f1-score": 0.684931506849315,
+      "support": 147.0
+    },
+    "Disgust": {
+      "precision": 0.6944444444444444,
+      "recall": 0.704225352112676,
+      "f1-score": 0.6993006993006993,
+      "support": 142.0
+    },
+    "Pleasant": {
+      "precision": 1.0,
+      "recall": 0.9848484848484849,
+      "f1-score": 0.9923664122137404,
+      "support": 66.0
+    },
+    "accuracy": 0.7366666666666667,
+    "macro avg": {
+      "precision": 0.7570580760235933,
+      "recall": 0.755291287791883,
+      "f1-score": 0.7558465581287283,
+      "support": 900.0
+    },
+    "weighted avg": {
+      "precision": 0.7368252373424786,
+      "recall": 0.7366666666666667,
+      "f1-score": 0.7364153645326067,
+      "support": 900.0
+    }
+  },
+  "source": "CREMA-D + TESS",
+  "datasets": [
+    "CREMA-D (91 actors)",
+    "TESS (2 speakers)"
+  ]
+}
